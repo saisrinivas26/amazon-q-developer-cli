@@ -12,6 +12,7 @@ pub mod prompts;
 pub mod subscribe;
 pub mod tools;
 pub mod usage;
+pub mod voice;
 
 use clap::Parser;
 use clear::ClearArgs;
@@ -26,6 +27,7 @@ use persist::PersistSubcommand;
 use profile::AgentSubcommand;
 use prompts::PromptsArgs;
 use tools::ToolsArgs;
+use voice::VoiceArgs;
 
 use crate::cli::chat::cli::subscribe::SubscribeArgs;
 use crate::cli::chat::cli::usage::UsageArgs;
@@ -60,6 +62,8 @@ pub enum SlashCommand {
     /// Open $EDITOR (defaults to vi) to compose a prompt
     #[command(name = "editor")]
     PromptEditor(EditorArgs),
+    /// Activate voice input mode to speak your prompt
+    Voice(VoiceArgs),
     /// Summarize the conversation to free up context space
     Compact(CompactArgs),
     /// View and manage tools and permissions
@@ -93,6 +97,7 @@ impl SlashCommand {
             Self::Context(args) => args.execute(os, session).await,
             Self::Knowledge(subcommand) => subcommand.execute(os, session).await,
             Self::PromptEditor(args) => args.execute(session).await,
+            Self::Voice(args) => args.execute(session).await,
             Self::Compact(args) => args.execute(os, session).await,
             Self::Tools(args) => args.execute(session).await,
             Self::Issue(args) => {
@@ -131,6 +136,7 @@ impl SlashCommand {
             Self::Context(_) => "context",
             Self::Knowledge(_) => "knowledge",
             Self::PromptEditor(_) => "editor",
+            Self::Voice(_) => "voice",
             Self::Compact(_) => "compact",
             Self::Tools(_) => "tools",
             Self::Issue(_) => "issue",

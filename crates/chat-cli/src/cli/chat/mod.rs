@@ -17,6 +17,7 @@ mod token_counter;
 pub mod tool_manager;
 pub mod tools;
 pub mod util;
+pub mod voice;
 
 use std::borrow::Cow;
 use std::collections::{
@@ -352,13 +353,14 @@ const SMALL_SCREEN_WELCOME_TEXT: &str = color_print::cstr! {"<em>Welcome to <cya
 const RESUME_TEXT: &str = color_print::cstr! {"<em>Picking up where we left off...</em>"};
 
 // Only show the model-related tip for now to make users aware of this feature.
-const ROTATING_TIPS: [&str; 16] = [
+const ROTATING_TIPS: [&str; 17] = [
     color_print::cstr! {"You can resume the last conversation from your current directory by launching with
     <green!>q chat --resume</green!>"},
     color_print::cstr! {"Get notified whenever Q CLI finishes responding.
     Just run <green!>q settings chat.enableNotifications true</green!>"},
     color_print::cstr! {"You can use
     <green!>/editor</green!> to edit your prompt with a vim-like experience"},
+    color_print::cstr! {"Use <green!>/voice</green!> to speak your prompt instead of typing it"},
     color_print::cstr! {"<green!>/usage</green!> shows you a visual breakdown of your current context window usage"},
     color_print::cstr! {"Get notified whenever Q CLI finishes responding. Just run <green!>q settings
     chat.enableNotifications true</green!>"},
