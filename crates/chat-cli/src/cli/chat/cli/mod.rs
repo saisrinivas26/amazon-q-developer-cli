@@ -97,7 +97,7 @@ impl SlashCommand {
             Self::Context(args) => args.execute(os, session).await,
             Self::Knowledge(subcommand) => subcommand.execute(os, session).await,
             Self::PromptEditor(args) => args.execute(session).await,
-            Self::Voice(args) => args.execute(session).await,
+            Self::Voice(args) => args.execute(os, session).await,
             Self::Compact(args) => args.execute(os, session).await,
             Self::Tools(args) => args.execute(session).await,
             Self::Issue(args) => {
