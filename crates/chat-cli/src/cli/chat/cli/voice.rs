@@ -6,27 +6,61 @@ use crossterm::style::{
     Color,
 };
 
+use crate::aws_common::behavior_version;
+use crate::cli::chat::voice::{
+    VoiceHandler,
+    show_voice_setup_help,
+};
 use crate::cli::chat::{
     ChatError,
     ChatSession,
     ChatState,
 };
-use crate::cli::chat::voice::{VoiceHandler, show_voice_setup_help};
-use crate::aws_common::behavior_version;
+use crate::database::settings::Setting;
+use crate::os::Os;
 
 #[derive(Debug, PartialEq, Args)]
 pub struct VoiceArgs {
-    /// Voice input language (default: en-US)
-    #[arg(long, default_value = "en-US")]
-    pub language: String,
+    /// Voice input language (default: stored setting or en-US)
+    #[arg(long)]
+    pub language: Option<String>,
+    
+    /// Set the default voice language for future sessions
+    #[arg(long)]
+    pub set_language: Option<String>,
 }
 
 impl VoiceArgs {
-    pub async fn execute(self, session: &mut ChatSession) -> Result<ChatState, ChatError> {
+    pub async fn execute(self, os: &mut Os, session: &mut ChatSession) -> Result<ChatState, ChatError> {
+        // Handle setting the default language if requested
+        if let Some(new_language) = &self.set_language {
+            os.database.settings.set(Setting::VoiceLanguage, new_language.clone()).await
+                .map_err(|e| ChatError::Custom(format!("Failed to save language setting: {}", e).into()))?;
+            
+            execute!(
+                session.stderr,
+                style::SetForegroundColor(Color::Green),
+                style::Print(format!("✅ Default voice language set to: {}\n", new_language)),
+                style::SetForegroundColor(Color::Reset)
+            )?;
+            
+            // If only setting language, return to prompt
+            if self.language.is_none() {
+                return Ok(ChatState::PromptUser {
+                    skip_printing_tools: true,
+                });
+            }
+        }
+        
+        // Determine which language to use
+        let language = self.language
+            .or_else(|| os.database.settings.get_string(Setting::VoiceLanguage))
+            .unwrap_or_else(|| "en-US".to_string());
+
         execute!(
             session.stderr,
             style::SetForegroundColor(Color::Cyan),
-            style::Print("🎤 Activating voice input mode...\n"),
+            style::Print(format!("🎤 Activating voice input mode (language: {})...\n", language)),
             style::SetForegroundColor(Color::Reset)
         )?;
 
@@ -34,11 +68,9 @@ impl VoiceArgs {
         show_voice_setup_help();
 
         // Create AWS config for transcribe service
-        let aws_config = aws_config::defaults(behavior_version())
-            .load()
-            .await;
+        let aws_config = aws_config::defaults(behavior_version()).load().await;
 
-        match VoiceHandler::new(&aws_config, &self.language).await {
+        match VoiceHandler::new(&aws_config, &language).await {
             Ok(voice_handler) => {
                 // Check voice setup
                 if let Err(e) = voice_handler.check_setup().await {
@@ -79,7 +111,7 @@ impl VoiceArgs {
 
                         // Process the voice input as user input
                         Ok(ChatState::HandleInput { input: voice_input })
-                    }
+                    },
                     Ok(None) => {
                         execute!(
                             session.stderr,
@@ -91,7 +123,7 @@ impl VoiceArgs {
                         Ok(ChatState::PromptUser {
                             skip_printing_tools: true,
                         })
-                    }
+                    },
                     Err(e) => {
                         execute!(
                             session.stderr,
@@ -105,9 +137,9 @@ impl VoiceArgs {
                         Ok(ChatState::PromptUser {
                             skip_printing_tools: true,
                         })
-                    }
+                    },
                 }
-            }
+            },
             Err(e) => {
                 execute!(
                     session.stderr,
@@ -121,7 +153,7 @@ impl VoiceArgs {
                 Ok(ChatState::PromptUser {
                     skip_printing_tools: true,
                 })
-            }
+            },
         }
     }
 }
