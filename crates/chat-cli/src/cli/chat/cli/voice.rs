@@ -24,7 +24,7 @@ pub struct VoiceArgs {
     /// Voice input language (default: stored setting or en-US)
     #[arg(long)]
     pub language: Option<String>,
-    
+
     /// Set the default voice language for future sessions
     #[arg(long)]
     pub set_language: Option<String>,
@@ -34,16 +34,19 @@ impl VoiceArgs {
     pub async fn execute(self, os: &mut Os, session: &mut ChatSession) -> Result<ChatState, ChatError> {
         // Handle setting the default language if requested
         if let Some(new_language) = &self.set_language {
-            os.database.settings.set(Setting::VoiceLanguage, new_language.clone()).await
+            os.database
+                .settings
+                .set(Setting::VoiceLanguage, new_language.clone())
+                .await
                 .map_err(|e| ChatError::Custom(format!("Failed to save language setting: {}", e).into()))?;
-            
+
             execute!(
                 session.stderr,
                 style::SetForegroundColor(Color::Green),
                 style::Print(format!("✅ Default voice language set to: {}\n", new_language)),
                 style::SetForegroundColor(Color::Reset)
             )?;
-            
+
             // If only setting language, return to prompt
             if self.language.is_none() {
                 return Ok(ChatState::PromptUser {
@@ -51,9 +54,10 @@ impl VoiceArgs {
                 });
             }
         }
-        
+
         // Determine which language to use
-        let language = self.language
+        let language = self
+            .language
             .or_else(|| os.database.settings.get_string(Setting::VoiceLanguage))
             .unwrap_or_else(|| "en-US".to_string());
 

@@ -8,9 +8,11 @@ use std::time::{
 };
 
 use aws_config::SdkConfig;
-use eyre::{
-    Result
-};
+use crossterm::style::Stylize;
+use eyre::Result;
+use rustyline::Editor;
+use rustyline::error::ReadlineError;
+use rustyline::history::FileHistory;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tracing::{
@@ -89,36 +91,38 @@ impl VoiceHandler {
         print!("⏱️  Recording: 0.0s | 🎙️  [░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░] | 💬 ");
         io::stdout().flush().ok();
 
-        // Create channels for user input handling
+        // Create channels for user input handling using rustyline
         let (input_tx, mut input_rx) = mpsc::channel::<InputEvent>(1);
-        
-        // Spawn task to handle Enter key input
+
+        // Spawn task to handle Enter key input using rustyline
         let input_handle = {
             let input_sender = input_tx.clone();
             tokio::spawn(async move {
-                // Use a simple approach that doesn't interfere with main signal handling
-                let enter_future = tokio::task::spawn_blocking(move || {
-                    let mut input = String::new();
-                    match std::io::stdin().read_line(&mut input) {
-                        Ok(_) => {
-                            // Check if the input was interrupted (which happens on Ctrl+C)
-                            if input.trim().is_empty() && input.is_empty() {
-                                InputEvent::CtrlC
-                            } else {
-                                InputEvent::Enter
-                            }
+                let input_future = tokio::task::spawn_blocking(move || -> InputEvent {
+                    // Create a minimal rustyline editor for voice mode input
+                    let mut rl = match Editor::<(), FileHistory>::new() {
+                        Ok(editor) => editor,
+                        Err(_) => return InputEvent::Error,
+                    };
+
+                    // Read input with rustyline - this will be consistent with main chat loop
+                    match rl.readline("") {
+                        Ok(_line) => {
+                            // Any input (empty or not) is treated as Enter to stop recording
+                            InputEvent::Enter
                         },
-                        Err(_) => InputEvent::CtrlC, // Treat errors as cancellation
+                        Err(ReadlineError::Interrupted | ReadlineError::Eof) => InputEvent::CtrlC,
+                        Err(_) => InputEvent::Error,
                     }
                 });
-                
-                match enter_future.await {
+
+                match input_future.await {
                     Ok(event) => {
                         let _ = input_sender.send(event).await;
-                    }
+                    },
                     Err(_) => {
                         let _ = input_sender.send(InputEvent::Error).await;
-                    }
+                    },
                 }
             })
         };
@@ -138,7 +142,7 @@ impl VoiceHandler {
                             // Clean up tasks
                             audio_forward_handle.abort();
                             input_handle.abort();
-                            
+
                             // Move to new line and show cancellation message
                             println!();
                             println!();
@@ -301,28 +305,30 @@ impl VoiceHandler {
         println!("   • Press [e] + [Enter] to edit in external editor ($EDITOR)");
         println!("   • Press [Ctrl+C] to cancel");
         println!();
-        print!("✏️  Action ([Enter] to submit, [e] for editor): ");
         io::stdout().flush().ok();
 
-        // Set up input handling without interfering with main signal handling
+        // Use rustyline for consistent input handling
         let (input_tx, mut input_rx) = mpsc::channel::<Option<String>>(1);
-        
+
         let input_handle = tokio::spawn(async move {
             let read_future = tokio::task::spawn_blocking(|| {
-                let mut choice = String::new();
-                match std::io::stdin().read_line(&mut choice) {
-                    Ok(_) => Some(choice.trim().to_lowercase()),
-                    Err(_) => None, // Treat errors (including Ctrl+C interruption) as cancellation
+                // Create a minimal rustyline editor for transcript editing
+                let mut rl = Editor::<(), FileHistory>::new().ok()?;
+
+                match rl.readline("> ".yellow().to_string().as_str()) {
+                    Ok(choice) => Some(choice.trim().to_lowercase()),
+                    Err(ReadlineError::Interrupted | ReadlineError::Eof) => None,
+                    Err(_) => None,
                 }
             });
-            
+
             match read_future.await {
                 Ok(choice) => {
                     let _ = input_tx.send(choice).await;
-                }
+                },
                 Err(_) => {
                     let _ = input_tx.send(None).await;
-                }
+                },
             }
         });
 
@@ -335,9 +341,9 @@ impl VoiceHandler {
                 println!();
                 println!("❌ Transcript editing cancelled");
                 return Ok(None);
-            }
+            },
         };
-        
+
         input_handle.abort();
 
         if choice.is_empty() {
