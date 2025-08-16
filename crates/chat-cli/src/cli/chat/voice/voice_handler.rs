@@ -8,11 +8,8 @@ use std::time::{
 };
 
 use aws_config::SdkConfig;
-use crossterm::style::Stylize;
 use eyre::Result;
-use rustyline::Editor;
-use rustyline::error::ReadlineError;
-use rustyline::history::FileHistory;
+
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tracing::{
@@ -94,24 +91,20 @@ impl VoiceHandler {
         // Create channels for user input handling using rustyline
         let (input_tx, mut input_rx) = mpsc::channel::<InputEvent>(1);
 
-        // Spawn task to handle Enter key input using rustyline
+        // Spawn task to handle Enter key input using simple stdin
         let input_handle = {
             let input_sender = input_tx.clone();
             tokio::spawn(async move {
+                use std::io::{stdin, BufRead, BufReader};
+                
                 let input_future = tokio::task::spawn_blocking(move || -> InputEvent {
-                    // Create a minimal rustyline editor for voice mode input
-                    let mut rl = match Editor::<(), FileHistory>::new() {
-                        Ok(editor) => editor,
-                        Err(_) => return InputEvent::Error,
-                    };
-
-                    // Read input with rustyline - this will be consistent with main chat loop
-                    match rl.readline("") {
-                        Ok(_line) => {
-                            // Any input (empty or not) is treated as Enter to stop recording
-                            InputEvent::Enter
-                        },
-                        Err(ReadlineError::Interrupted | ReadlineError::Eof) => InputEvent::CtrlC,
+                    let stdin = stdin();
+                    let mut reader = BufReader::new(stdin);
+                    let mut line = String::new();
+                    
+                    match reader.read_line(&mut line) {
+                        Ok(0) => InputEvent::CtrlC, // EOF indicates Ctrl+C or Ctrl+D
+                        Ok(_) => InputEvent::Enter,
                         Err(_) => InputEvent::Error,
                     }
                 });
@@ -311,13 +304,18 @@ impl VoiceHandler {
         let (input_tx, mut input_rx) = mpsc::channel::<Option<String>>(1);
 
         let input_handle = tokio::spawn(async move {
+            use std::io::{stdin, BufRead, BufReader};
+            
             let read_future = tokio::task::spawn_blocking(|| {
-                // Create a minimal rustyline editor for transcript editing
-                let mut rl = Editor::<(), FileHistory>::new().ok()?;
-
-                match rl.readline("> ".yellow().to_string().as_str()) {
-                    Ok(choice) => Some(choice.trim().to_lowercase()),
-                    Err(ReadlineError::Interrupted | ReadlineError::Eof) => None,
+                print!("> ");
+                io::stdout().flush().ok();
+                
+                let stdin = stdin();
+                let mut reader = BufReader::new(stdin);
+                let mut line = String::new();
+                
+                match reader.read_line(&mut line) {
+                    Ok(_) => Some(line.trim().to_lowercase()),
                     Err(_) => None,
                 }
             });
