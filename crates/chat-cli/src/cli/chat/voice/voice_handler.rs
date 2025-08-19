@@ -238,12 +238,14 @@ impl VoiceHandler {
                             // End if no audio activity for 5 seconds
                             if last_activity_time.elapsed() > activity_timeout {
                                 debug!("Activity timeout reached, ending transcription");
+                                println!("\n🔇 No voice activity for 5s - ending voice input");
                                 break;
                             }
                             
                             // End if no speech for 5 seconds but we have some transcript
                             if last_speech_time.elapsed() > speech_timeout && !current_transcript.trim().is_empty() {
                                 debug!("Speech timeout reached with existing transcript, ending transcription");
+                                println!("\n🔇 No voice activity for 5s - ending voice input");
                                 break;
                             }
                         }
@@ -257,7 +259,6 @@ impl VoiceHandler {
         input_handle.abort();
 
         // Move to new line after recording
-        println!();
         println!();
 
         let final_transcript = current_transcript.trim().to_string();

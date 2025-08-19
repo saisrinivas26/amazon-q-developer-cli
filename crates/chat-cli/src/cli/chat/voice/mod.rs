@@ -37,12 +37,17 @@ pub fn show_voice_setup_help() {
     println!();
     println!("Requirements:");
     println!("• Microphone access permission");
-    println!("• AWS credentials with Transcribe permissions");
-    println!("• Stable internet connection");
+    println!("• AWS credentials with Transcribe permissions OR local models");
+    println!("• Stable internet connection (for AWS Transcribe only)");
     println!();
     println!("Usage:");
     println!("• Speak clearly into your microphone in English");
     println!("• Pause briefly when finished speaking");
     println!("• Press Enter to stop recording or Ctrl+C to cancel");
+    println!();
+    println!("Backend Options:");
+    println!("• AWS Transcribe: /voice or /voice --backend aws-transcribe (default)");
+    println!("• Local Whisper: /voice --backend local-whisper");
+    println!("• Local Parakeet: /voice --backend local-parakeet");
     println!();
 }
