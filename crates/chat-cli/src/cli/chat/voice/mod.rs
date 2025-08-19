@@ -41,13 +41,8 @@ pub fn show_voice_setup_help() {
     println!("• Stable internet connection");
     println!();
     println!("Usage:");
-    println!("• Speak clearly into your microphone");
+    println!("• Speak clearly into your microphone in English");
     println!("• Pause briefly when finished speaking");
     println!("• Press Enter to stop recording or Ctrl+C to cancel");
-    println!();
-    println!("Language Settings:");
-    println!("• Use --language to set language for this session");
-    println!("• Use --set-language to save as default for future sessions");
-    println!("• Supported: en, es, fr, de, it, pt, ja, ko, zh");
     println!();
 }

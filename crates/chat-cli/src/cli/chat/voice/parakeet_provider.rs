@@ -16,13 +16,12 @@ use super::common::{
 };
 
 pub struct ParakeetProvider {
-    _language: String,
     vad_threshold_db: f64,
     python_executable: PathBuf,
 }
 
 impl ParakeetProvider {
-    pub async fn new(language: &str) -> Result<Self> {
+    pub async fn new(_language: &str) -> Result<Self> {
         // Detect Python executable
         let python_executable = detect_python_executable().await?;
         
@@ -31,7 +30,6 @@ impl ParakeetProvider {
         
         // Create instance
         let provider = Self {
-            _language: language.to_string(),
             vad_threshold_db,
             python_executable,
         };

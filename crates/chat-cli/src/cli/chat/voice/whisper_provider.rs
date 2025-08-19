@@ -15,13 +15,12 @@ use super::common::{
 };
 
 pub struct WhisperProvider {
-    language: String,
     vad_threshold_db: f64,
     python_executable: PathBuf,
 }
 
 impl WhisperProvider {
-    pub async fn new(language: &str) -> Result<Self> {
+    pub async fn new(_language: &str) -> Result<Self> {
         // Detect Python executable
         let python_executable = detect_python_executable().await?;
         
@@ -30,7 +29,6 @@ impl WhisperProvider {
         
         // Create instance
         let provider = Self {
-            language: language.to_string(),
             vad_threshold_db,
             python_executable,
         };
@@ -258,7 +256,7 @@ impl TranscriptionProvider for WhisperProvider {
         // Capture instance fields needed in the async task
         let vad_threshold_db = self.vad_threshold_db;
         let python_executable = self.python_executable.clone();
-        let language = self.language.clone();
+        let language = "en".to_string(); // Hardcoded to English
 
         // Stream transcription with periodic processing
         tokio::spawn(async move {

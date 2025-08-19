@@ -42,7 +42,10 @@ pub struct VoiceHandler {
 }
 
 impl VoiceHandler {
-    pub async fn new(aws_config: &SdkConfig, language: &str, backend: TranscriptionBackend) -> Result<Self> {
+    pub async fn new(aws_config: &SdkConfig, backend: TranscriptionBackend) -> Result<Self> {
+        // Hardcoded to English ("en")
+        let language = "en";
+        
         let provider: Box<dyn TranscriptionProvider + Send + Sync> = match backend {
             TranscriptionBackend::AwsTranscribe => {
                 Box::new(AwsTranscribeProvider::new(aws_config, language).await?)

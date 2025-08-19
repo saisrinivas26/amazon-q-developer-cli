@@ -10,8 +10,9 @@ pub struct AwsTranscribeProvider {
 }
 
 impl AwsTranscribeProvider {
-    pub async fn new(aws_config: &SdkConfig, language: &str) -> Result<Self> {
-        let transcriber = VoiceTranscriber::new(aws_config, language).await?;
+    pub async fn new(aws_config: &SdkConfig, _language: &str) -> Result<Self> {
+        // Hardcoded to English ("en")
+        let transcriber = VoiceTranscriber::new(aws_config, "en").await?;
         Ok(Self { transcriber })
     }
 }

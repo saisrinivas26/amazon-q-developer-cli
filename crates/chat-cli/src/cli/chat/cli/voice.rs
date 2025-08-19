@@ -22,12 +22,12 @@ use crate::os::Os;
 
 #[derive(Debug, PartialEq, Args)]
 pub struct VoiceArgs {
-    /// Voice input language (default: stored setting or en-US)
-    #[arg(long)]
+    /// Voice input language (kept for UI display purposes only)
+    #[arg(long, hide = true)]
     pub language: Option<String>,
 
-    /// Set the default voice language for future sessions
-    #[arg(long)]
+    /// Set the default voice language (kept for UI display purposes only)
+    #[arg(long, hide = true)]
     pub set_language: Option<String>,
 
     /// Transcription backend to use
@@ -99,7 +99,8 @@ impl VoiceArgs {
         // Create AWS config for transcribe service
         let aws_config = aws_config::defaults(behavior_version()).load().await;
 
-        match VoiceHandler::new(&aws_config, &language, self.backend.clone().into()).await {
+        // Using hardcoded English but still showing user's language preference in UI
+        match VoiceHandler::new(&aws_config, self.backend.clone().into()).await {
             Ok(voice_handler) => {
                 // Check voice setup
                 if let Err(e) = voice_handler.check_setup().await {
