@@ -2,42 +2,42 @@
 
 ## Introduction
 
-This feature adds local voice-to-text (ASR) capabilities to the Amazon Q Developer CLI, providing an alternative to cloud-based AWS Transcribe. The implementation will integrate NVIDIA's Parakeet TDT 0.6B V2 model to enable offline speech recognition with high accuracy, supporting punctuation, capitalization, and timestamp prediction. This allows users to have voice interactions even without internet connectivity or when preferring local processing for privacy reasons.
+This feature adds voice-to-text transcription capabilities to the Amazon Q Developer CLI, primarily using AWS Transcribe as the core service. The implementation will follow a multi-provider architecture pattern (inspired by the Whispering reference implementation) that allows for extensible transcription services while maintaining AWS Transcribe as the default and primary provider. This enables voice interactions with the CLI while providing a foundation for future provider additions if needed.
 
 ## Requirements
 
 ### Requirement 1
 
-**User Story:** As a developer using Amazon Q CLI, I want to use local voice-to-text processing so that I can interact with the CLI through voice commands even when offline or when I prefer local processing for privacy.
+**User Story:** As a developer using Amazon Q CLI, I want to use voice-to-text processing so that I can interact with the CLI through voice commands using AWS Transcribe as the primary service.
 
 #### Acceptance Criteria
 
-1. WHEN the user enables local ASR mode THEN the system SHALL use the local Parakeet TDT model instead of AWS Transcribe
-2. WHEN the user speaks into their microphone THEN the system SHALL process the audio locally and convert it to text
-3. WHEN local processing is active THEN the system SHALL NOT send audio data to external services
-4. WHEN the local model is not available THEN the system SHALL fallback to AWS Transcribe with user notification
+1. WHEN the user enables voice mode THEN the system SHALL use AWS Transcribe to process audio input
+2. WHEN the user speaks into their microphone THEN the system SHALL capture audio and send it to AWS Transcribe for processing
+3. WHEN AWS Transcribe is unavailable THEN the system SHALL provide clear error messages and fallback options
+4. WHEN the user has valid AWS credentials THEN the system SHALL authenticate successfully with AWS Transcribe
 
 ### Requirement 2
 
-**User Story:** As a user, I want the local voice-to-text to have comparable accuracy to cloud services so that my voice commands are understood correctly.
+**User Story:** As a user, I want the voice-to-text transcription to be accurate and reliable so that my voice commands are understood correctly by the CLI.
 
 #### Acceptance Criteria
 
-1. WHEN processing English speech THEN the system SHALL achieve word error rates comparable to the Parakeet TDT benchmarks (6.05% average WER)
-2. WHEN processing audio with background noise THEN the system SHALL maintain reasonable accuracy up to SNR 0dB
-3. WHEN processing different audio formats THEN the system SHALL support .wav and .flac files at 16kHz
-4. WHEN transcribing speech THEN the system SHALL include proper punctuation and capitalization
+1. WHEN processing English speech THEN the system SHALL leverage AWS Transcribe's high accuracy speech recognition
+2. WHEN processing audio with background noise THEN the system SHALL use AWS Transcribe's noise reduction capabilities
+3. WHEN processing different audio formats THEN the system SHALL support common formats (wav, mp3, flac, m4a) through automatic conversion
+4. WHEN transcribing speech THEN the system SHALL include proper punctuation and capitalization using AWS Transcribe features
 
 ### Requirement 3
 
-**User Story:** As a developer, I want to configure voice-to-text settings so that I can choose between local and cloud processing based on my needs.
+**User Story:** As a developer, I want to configure voice-to-text settings so that I can customize the transcription behavior and AWS Transcribe options based on my needs.
 
 #### Acceptance Criteria
 
-1. WHEN configuring the CLI THEN the user SHALL be able to select between local ASR, AWS Transcribe, or auto-fallback modes
-2. WHEN in auto-fallback mode THEN the system SHALL prefer local processing and fallback to cloud when local is unavailable
-3. WHEN switching modes THEN the system SHALL persist the user's preference across sessions
-4. WHEN local model is not installed THEN the system SHALL provide clear instructions for installation
+1. WHEN configuring the CLI THEN the user SHALL be able to set AWS region, language preferences, and transcription options
+2. WHEN configuring AWS credentials THEN the system SHALL support standard AWS credential methods (profiles, environment variables, IAM roles)
+3. WHEN switching settings THEN the system SHALL persist the user's preferences across sessions
+4. WHEN AWS credentials are not configured THEN the system SHALL provide clear instructions for setup
 
 ### Requirement 4
 
@@ -52,33 +52,44 @@ This feature adds local voice-to-text (ASR) capabilities to the Amazon Q Develop
 
 ### Requirement 5
 
-**User Story:** As a developer, I want the local ASR integration to be performant so that voice interactions feel responsive and natural.
+**User Story:** As a developer, I want the AWS Transcribe integration to be performant so that voice interactions feel responsive and natural.
 
 #### Acceptance Criteria
 
-1. WHEN processing audio segments THEN the system SHALL complete transcription within 2 seconds for utterances under 10 seconds
-2. WHEN the model is loaded THEN it SHALL consume no more than 2GB of system RAM as specified by the model requirements
-3. WHEN running on supported hardware THEN the system SHALL leverage GPU acceleration when available
-4. WHEN processing long audio THEN the system SHALL support segments up to 24 minutes as per model capabilities
+1. WHEN processing audio segments THEN the system SHALL complete transcription within reasonable time limits based on AWS Transcribe performance
+2. WHEN using streaming transcription THEN the system SHALL provide real-time or near real-time results
+3. WHEN processing concurrent requests THEN the system SHALL handle multiple transcription requests efficiently
+4. WHEN processing long audio THEN the system SHALL support AWS Transcribe's maximum file duration limits
 
 ### Requirement 6
 
-**User Story:** As a user, I want timestamp information from local voice processing so that I can understand the timing of my speech for debugging or review purposes.
+**User Story:** As a user, I want timestamp information from AWS Transcribe so that I can understand the timing of my speech for debugging or review purposes.
 
 #### Acceptance Criteria
 
-1. WHEN transcribing audio THEN the system SHALL provide word-level timestamps
-2. WHEN requested THEN the system SHALL provide segment-level and character-level timestamps
+1. WHEN transcribing audio THEN the system SHALL request and provide word-level timestamps from AWS Transcribe
+2. WHEN available THEN the system SHALL provide segment-level timestamps and confidence scores
 3. WHEN displaying transcription results THEN timestamps SHALL be formatted in a human-readable format
 4. WHEN logging voice interactions THEN timestamp data SHALL be included for debugging purposes
 
 ### Requirement 7
 
-**User Story:** As a system administrator, I want the local ASR feature to handle model management automatically so that users don't need to manually manage model files.
+**User Story:** As a developer, I want the transcription architecture to be extensible so that additional providers can be added in the future while maintaining AWS Transcribe as the primary service.
 
 #### Acceptance Criteria
 
-1. WHEN first using local ASR THEN the system SHALL automatically download and install the Parakeet TDT model
-2. WHEN model files are corrupted THEN the system SHALL detect this and re-download automatically
-3. WHEN model updates are available THEN the system SHALL provide options to update with user consent
-4. WHEN disk space is insufficient THEN the system SHALL warn users and provide cleanup options
+1. WHEN implementing the transcription service THEN the system SHALL use a provider pattern that allows for multiple transcription services
+2. WHEN adding new providers THEN the system SHALL maintain a consistent interface following the Whispering reference architecture
+3. WHEN switching between providers THEN the system SHALL maintain consistent error handling and result formatting
+4. WHEN AWS Transcribe is the active provider THEN it SHALL be the default and recommended option in all configurations
+
+### Requirement 8
+
+**User Story:** As a user, I want robust error handling and recovery so that voice transcription failures are handled gracefully with clear feedback.
+
+#### Acceptance Criteria
+
+1. WHEN AWS Transcribe returns an error THEN the system SHALL provide user-friendly error messages with actionable guidance
+2. WHEN network connectivity issues occur THEN the system SHALL detect this and suggest appropriate troubleshooting steps
+3. WHEN authentication fails THEN the system SHALL guide users to configure their AWS credentials properly
+4. WHEN audio format is unsupported THEN the system SHALL attempt automatic conversion or provide clear format requirements

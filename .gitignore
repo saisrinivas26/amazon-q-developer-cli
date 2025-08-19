@@ -49,4 +49,5 @@ book/
 .env*
 
 run-build.sh
-.kiro
+.kiro/
+sai-work-docs/

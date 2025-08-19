@@ -44,6 +44,9 @@ pub enum Setting {
     ChatDisableAutoCompaction,
     ChatEnableHistoryHints,
     VoiceLanguage,
+    VoiceProvider,
+    VoiceTemperature,
+    VoiceStreamingEnabled,
 }
 
 impl AsRef<str> for Setting {
@@ -76,6 +79,9 @@ impl AsRef<str> for Setting {
             Self::ChatDisableAutoCompaction => "chat.disableAutoCompaction",
             Self::ChatEnableHistoryHints => "chat.enableHistoryHints",
             Self::VoiceLanguage => "voice.language",
+            Self::VoiceProvider => "voice.provider",
+            Self::VoiceTemperature => "voice.temperature",
+            Self::VoiceStreamingEnabled => "voice.streamingEnabled",
         }
     }
 }
@@ -118,6 +124,9 @@ impl TryFrom<&str> for Setting {
             "chat.disableAutoCompaction" => Ok(Self::ChatDisableAutoCompaction),
             "chat.enableHistoryHints" => Ok(Self::ChatEnableHistoryHints),
             "voice.language" => Ok(Self::VoiceLanguage),
+            "voice.provider" => Ok(Self::VoiceProvider),
+            "voice.temperature" => Ok(Self::VoiceTemperature),
+            "voice.streamingEnabled" => Ok(Self::VoiceStreamingEnabled),
             _ => Err(DatabaseError::InvalidSetting(value.to_string())),
         }
     }

@@ -9,7 +9,7 @@ pub trait TranscriptionProvider {
     async fn start_transcription(&self) -> Result<TranscriptionResult>;
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum TranscriptionBackend {
     AwsTranscribe,
     LocalParakeet,

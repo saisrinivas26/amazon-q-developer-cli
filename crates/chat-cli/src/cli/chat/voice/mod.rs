@@ -1,35 +1,30 @@
+// Core modules
 pub mod audio_capture;
 pub mod common;
 pub mod transcriber;
+
+// New architecture modules
+pub mod settings;
+pub mod error;
+pub mod streaming;
+pub mod model_manager;
+pub mod provider;
+pub mod simple_handler;
+pub mod providers;
+
+// Legacy modules (for compatibility)
 pub mod voice_handler;
 pub mod transcription_provider;
 pub mod aws_transcribe_provider;
 pub mod parakeet_provider;
 pub mod whisper_provider;
 
+// Re-exports
 pub use audio_capture::AudioCapture;
-use thiserror::Error;
-pub use voice_handler::VoiceHandler;
+pub use simple_handler::SimpleVoiceHandler;
+pub use voice_handler::VoiceHandler; // Legacy
 pub use transcription_provider::TranscriptionBackend;
-
-#[derive(Debug, Error)]
-pub enum VoiceError {
-    #[error("Microphone not available or permission denied")]
-    MicrophoneUnavailable,
-
-    #[error("AWS Transcribe service unavailable: {0}")]
-    TranscribeUnavailable(String),
-
-    #[error("Audio format not supported")]
-    UnsupportedAudioFormat,
-
-    #[error("Network connectivity issues")]
-    #[allow(dead_code)]
-    NetworkError,
-
-    #[error("Audio processing error: {0}")]
-    AudioProcessingError(String),
-}
+pub use error::VoiceError;
 
 pub fn show_voice_setup_help() {
     println!("🎤 Voice Mode Setup");
@@ -41,13 +36,19 @@ pub fn show_voice_setup_help() {
     println!("• Stable internet connection (for AWS Transcribe only)");
     println!();
     println!("Usage:");
-    println!("• Speak clearly into your microphone in English");
-    println!("• Pause briefly when finished speaking");
+    println!("• Speak clearly into your microphone");
+    println!("• Real-time transcription with streaming providers");
     println!("• Press Enter to stop recording or Ctrl+C to cancel");
     println!();
     println!("Backend Options:");
-    println!("• AWS Transcribe: /voice or /voice --backend aws-transcribe (default)");
-    println!("• Local Whisper: /voice --backend local-whisper");
-    println!("• Local Parakeet: /voice --backend local-parakeet");
+    println!("• AWS Transcribe: /voice --backend aws-transcribe (streaming)");
+    println!("• Local Whisper: /voice --backend local-whisper (batch)");
+    println!("• Local Parakeet: /voice --backend local-parakeet (streaming)");
+    println!();
+    println!("Features:");
+    println!("• 🔄 Real-time streaming transcription");
+    println!("• 📁 Automatic model management");
+    println!("• ⚙️ Configurable settings");
+    println!("• 🎯 Multi-provider support");
     println!();
 }
