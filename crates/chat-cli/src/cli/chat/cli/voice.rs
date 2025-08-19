@@ -89,7 +89,7 @@ impl VoiceArgs {
         execute!(
             session.stderr,
             style::SetForegroundColor(Color::Cyan),
-            style::Print(format!("🎤 Activating voice input mode (language: {})...\n", language)),
+            style::Print(format!("🎤 Activating voice input mode (language: {})\n", language)),
             style::SetForegroundColor(Color::Reset)
         )?;
 

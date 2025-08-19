@@ -33,7 +33,7 @@ pub enum VoiceError {
 
 pub fn show_voice_setup_help() {
     println!("🎤 Voice Mode Setup");
-    println!("==================");
+    println!("==================================================================");
     println!();
     println!("Requirements:");
     println!("• Microphone access permission");

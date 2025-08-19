@@ -2,172 +2,167 @@
 
 ## Overview
 
-This design implements local voice-to-text capabilities using NVIDIA's Parakeet TDT 0.6B V2 model as an alternative to AWS Transcribe. The solution integrates with the existing voice infrastructure in the Amazon Q CLI while adding local processing capabilities for offline usage and enhanced privacy.
+This design completes the local voice-to-text capabilities using NVIDIA's Parakeet TDT 0.6B V2 model as an alternative to AWS Transcribe. The Amazon Q CLI already has a comprehensive voice infrastructure with support for multiple transcription backends including AWS Transcribe, Local Whisper, and a placeholder for Local Parakeet.
 
-The design leverages the existing `TranscriptionProvider` trait architecture, allowing seamless switching between cloud and local processing modes. The implementation will use Python bindings to interface with the NeMo toolkit for model execution, while maintaining the Rust-based audio capture and processing pipeline.
+**Current State Analysis:**
+- ✅ Complete voice infrastructure with `TranscriptionProvider` trait
+- ✅ Audio capture system using CPAL
+- ✅ Voice Activity Detection (VAD) 
+- ✅ Backend selection via CLI arguments (`--backend local-parakeet`)
+- ✅ Whisper provider fully implemented as reference
+- ⚠️ Parakeet provider exists but returns "not yet implemented" error
+- ✅ Common utilities for Python integration, model management, and audio processing
+
+**What Needs to Be Built:**
+The primary task is completing the `ParakeetProvider` implementation by replacing the placeholder with actual NeMo/Parakeet TDT integration, following the established patterns from the WhisperProvider.
 
 ## Architecture
 
-### High-Level Architecture
+### Current Architecture (Already Implemented)
 
 ```mermaid
 graph TB
-    A[User Voice Input] --> B[Audio Capture - Rust/CPAL]
-    B --> C[Voice Handler]
-    C --> D{Transcription Backend}
-    D -->|Local Mode| E[Parakeet Provider]
-    D -->|Cloud Mode| F[AWS Transcribe Provider]
-    D -->|Auto Mode| G[Fallback Logic]
+    A[User Voice Input] --> B[Audio Capture - CPAL ✅]
+    B --> C[Voice Handler ✅]
+    C --> D{Backend Selection ✅}
+    D -->|--backend local-parakeet| E[Parakeet Provider ⚠️]
+    D -->|--backend local-whisper| F[Whisper Provider ✅]
+    D -->|--backend aws-transcribe| G[AWS Transcribe Provider ✅]
     
-    E --> H[Model Manager]
-    H --> I[Python/NeMo Bridge]
-    I --> J[Parakeet TDT Model]
-    J --> K[Local Transcription Result]
+    E --> H[NeMo Integration ❌]
+    F --> I[OpenAI Whisper ✅]
+    G --> J[AWS Transcribe Service ✅]
     
-    F --> L[AWS Transcribe Service]
-    L --> M[Cloud Transcription Result]
+    H --> K[Parakeet TDT Model ❌]
+    I --> L[Whisper Model ✅]
+    J --> M[Cloud Transcription ✅]
     
-    G --> N[Availability Check]
-    N -->|Local Available| E
-    N -->|Local Unavailable| F
-    
-    K --> O[Unified Result Processing]
-    M --> O
-    O --> P[CLI Response]
+    K --> N[Local Transcription Result ❌]
+    L --> N
+    M --> N
+    N --> O[Unified Result Processing ✅]
+    O --> P[CLI Response ✅]
 ```
+
+**Legend:** ✅ Implemented | ⚠️ Placeholder | ❌ Missing
 
 ### Component Architecture
 
-The implementation extends the existing voice architecture with these key components:
+The implementation completes the existing voice architecture by implementing the missing Parakeet components:
 
-1. **Enhanced Parakeet Provider**: Complete implementation of the `TranscriptionProvider` trait
-2. **Model Manager**: Handles model downloading, caching, and lifecycle management
-3. **Python Bridge**: Rust-Python interop for NeMo toolkit integration
-4. **Configuration Manager**: Manages local vs cloud preferences and fallback logic
-5. **Performance Monitor**: Tracks processing times and resource usage
+**Existing Infrastructure (Reuse):**
+1. ✅ **TranscriptionProvider Trait**: Well-defined interface for all backends
+2. ✅ **Audio Capture System**: CPAL-based microphone input with VAD
+3. ✅ **Voice Handler**: Manages transcription lifecycle and user interaction
+4. ✅ **Common Utilities**: Python detection, dependency checking, model caching
+5. ✅ **CLI Integration**: Backend selection via `--backend local-parakeet`
+
+**New Components (To Implement):**
+1. **Complete Parakeet Provider**: Replace placeholder with NeMo integration
+2. **NeMo Python Scripts**: Parakeet-specific transcription scripts
+3. **Model Management**: Parakeet TDT model download and caching
+4. **Audio Format Handling**: Ensure 16kHz mono compatibility
 
 ## Components and Interfaces
 
-### 1. Enhanced Parakeet Provider
+### 1. Complete Parakeet Provider Implementation
+
+The existing `ParakeetProvider` struct needs to be completed following the `WhisperProvider` pattern:
 
 ```rust
 pub struct ParakeetProvider {
-    model_manager: Arc<ModelManager>,
-    python_bridge: Arc<PythonBridge>,
-    config: ParakeetConfig,
-}
-
-pub struct ParakeetConfig {
-    pub model_path: PathBuf,
-    pub language: String,
-    pub enable_timestamps: bool,
-    pub max_audio_length: Duration,
-    pub processing_timeout: Duration,
+    vad_threshold_db: f64,
+    python_executable: PathBuf,
 }
 ```
 
-**Key Methods:**
-- `new(language: &str, config: ParakeetConfig) -> Result<Self>`
-- `start_transcription() -> Result<TranscriptionResult>`
-- `check_availability() -> bool`
-- `get_model_info() -> ModelInfo`
+**Key Methods (Following WhisperProvider Pattern):**
+- `new(language: &str) -> Result<Self>` - Initialize with dependency checks
+- `start_transcription() -> Result<TranscriptionResult>` - Main transcription loop
+- `check_dependencies() -> Result<()>` - Verify NeMo installation
+- `preload_model() -> Result<()>` - Download and cache Parakeet TDT model
+- `transcribe_with_parakeet(wav_path, python_executable, language) -> Result<String>` - Core transcription
 
-### 2. Model Manager
+### 2. NeMo Integration Scripts
 
-```rust
-pub struct ModelManager {
-    model_cache_dir: PathBuf,
-    download_client: reqwest::Client,
-    model_info: ModelInfo,
-}
+Following the Whisper pattern, create Python scripts for Parakeet TDT integration:
 
-pub struct ModelInfo {
-    pub version: String,
-    pub size_bytes: u64,
-    pub checksum: String,
-    pub download_url: String,
-}
+**Dependency Check Script:**
+```python
+# Check for: nemo_toolkit[asr], torch, librosa, soundfile
+packages = ["nemo_toolkit", "torch", "librosa", "soundfile"]
 ```
 
-**Responsibilities:**
-- Download Parakeet TDT model from HuggingFace
-- Verify model integrity using checksums
-- Manage model versioning and updates
-- Handle disk space requirements (2GB+ for model)
-- Provide model availability status
-
-### 3. Python Bridge
-
-```rust
-pub struct PythonBridge {
-    python_path: PathBuf,
-    nemo_env_path: Option<PathBuf>,
-    model_instance: Option<PyObject>,
-}
-
-pub struct TranscriptionRequest {
-    pub audio_data: Vec<f32>,
-    pub sample_rate: u32,
-    pub enable_timestamps: bool,
-}
-
-pub struct TranscriptionResponse {
-    pub text: String,
-    pub confidence: f32,
-    pub word_timestamps: Option<Vec<WordTimestamp>>,
-    pub processing_time: Duration,
-}
+**Model Preload Script:**
+```python
+import nemo.collections.asr as nemo_asr
+model = nemo_asr.models.ASRModel.from_pretrained("nvidia/parakeet-tdt-0.6b-v2")
 ```
 
-**Key Features:**
-- Manages Python environment and NeMo dependencies
-- Handles audio format conversion (16kHz mono)
-- Provides async interface for model inference
-- Manages model loading and memory usage
-- Implements timeout and error handling
-
-### 4. Configuration Manager
-
-```rust
-pub struct VoiceConfig {
-    pub backend: TranscriptionBackend,
-    pub fallback_enabled: bool,
-    pub local_model_path: Option<PathBuf>,
-    pub performance_monitoring: bool,
-}
-
-#[derive(Debug, Clone)]
-pub enum TranscriptionBackend {
-    AwsTranscribe,
-    LocalParakeet,
-    AutoFallback, // New option
-}
+**Transcription Script:**
+```python
+# Load model and transcribe with timestamps
+output = model.transcribe([wav_path], timestamps=True)
 ```
 
-**Configuration Options:**
-- Backend selection (AWS, Local, Auto)
-- Model download preferences
-- Performance monitoring settings
-- Fallback behavior configuration
-- Language preferences
+**Model Management:**
+- Leverage existing `is_model_cached()` function for HuggingFace cache detection
+- Use NeMo's automatic model download from HuggingFace Hub
+- No manual model management needed (NeMo handles this)
 
-### 5. Audio Processing Pipeline
+### 3. Audio Processing Integration
 
-The existing audio capture system will be enhanced to support local processing requirements:
+Reuse existing audio processing infrastructure:
 
-```rust
-pub struct AudioProcessor {
-    pub sample_rate: u32, // Fixed at 16kHz for Parakeet
-    pub channels: u16,    // Mono channel
-    pub format: AudioFormat,
-}
+**Existing Components:**
+- ✅ `detect_voice_activity()` - VAD using RMS analysis
+- ✅ `create_wav_file()` - Convert raw audio to WAV format
+- ✅ `detect_python_executable()` - Find suitable Python installation
+- ✅ `check_python_dependencies()` - Verify package installation
+
+**Parakeet-Specific Requirements:**
+- Ensure 16kHz sample rate (already handled by existing audio capture)
+- Mono channel audio (already configured)
+- WAV format compatibility (existing `create_wav_file()` function)
+- Voice Activity Detection with configurable threshold (already implemented)
+
+### 4. Backend Selection (Already Implemented)
+
+The CLI already supports Parakeet backend selection:
+
+```bash
+# Use Parakeet TDT for local transcription
+q chat /voice --backend local-parakeet
+
+# Use Whisper for local transcription  
+q chat /voice --backend local-whisper
+
+# Use AWS Transcribe (default)
+q chat /voice --backend aws-transcribe
 ```
 
-**Enhancements:**
-- Ensure 16kHz sample rate for Parakeet compatibility
-- Add audio format validation
-- Implement audio segmentation for long recordings (24-minute max)
-- Add voice activity detection for better processing
+**Existing Configuration:**
+- ✅ `TranscriptionBackend::LocalParakeet` enum variant
+- ✅ CLI argument parsing with `--backend local-parakeet`
+- ✅ Backend routing in `VoiceHandler::new()`
+- ✅ Error handling and fallback to text input
+
+### 5. Transcription Loop Pattern (Reuse Existing)
+
+The Parakeet implementation will follow the exact same pattern as WhisperProvider:
+
+**Existing Pattern:**
+1. ✅ Audio buffer accumulation with VAD
+2. ✅ Periodic processing (every 2 seconds)
+3. ✅ Session timeout handling (5s silence, 30s max)
+4. ✅ Real-time transcript updates
+5. ✅ Final processing of remaining audio
+6. ✅ Error handling and cleanup
+
+**Parakeet Adaptations:**
+- Replace Whisper Python scripts with NeMo/Parakeet scripts
+- Adjust processing timeouts for Parakeet performance characteristics
+- Maintain same audio buffer and VAD logic
 
 ## Data Models
 
@@ -302,70 +297,61 @@ pub enum VoiceError {
    - Different system configurations
    - Cross-platform functionality (macOS, Linux, Windows)
 
-## Implementation Phases
+## Implementation Approach
 
-### Phase 1: Core Infrastructure
-- Model Manager implementation
-- Python Bridge development
-- Basic Parakeet Provider structure
-- Configuration management
+### Single Phase Implementation
 
-### Phase 2: Model Integration
-- NeMo toolkit integration
-- Audio processing pipeline
-- Transcription functionality
-- Basic error handling
+Since the infrastructure is already complete, this is a focused implementation:
 
-### Phase 3: Advanced Features
-- Timestamp support
-- Performance optimization
-- Fallback mechanisms
-- Configuration UI
+**Step 1: Replace Placeholder Implementation**
+- Remove the "not yet implemented" error from `ParakeetProvider`
+- Implement the same structure as `WhisperProvider`
 
-### Phase 4: Production Readiness
-- Comprehensive testing
-- Documentation
-- Performance tuning
-- User experience polish
+**Step 2: Create NeMo Python Scripts**
+- Dependency check script for NeMo toolkit
+- Model preload script for Parakeet TDT
+- Transcription script with timestamp support
+
+**Step 3: Integrate Audio Processing**
+- Reuse existing VAD and audio buffer logic
+- Adapt timeout values for Parakeet performance
+- Maintain same user experience as Whisper
+
+**Step 4: Testing and Validation**
+- Test with various audio inputs
+- Verify model download and caching
+- Ensure error handling works correctly
 
 ## Dependencies
 
-### New Rust Dependencies
+### Rust Dependencies (No Changes Needed)
 
-```toml
-# Python integration
-pyo3 = { version = "0.20", features = ["auto-initialize"] }
-pyo3-asyncio = "0.20"
+All required dependencies are already in the workspace:
+- ✅ `tokio` - Async runtime
+- ✅ `eyre` - Error handling  
+- ✅ `tempfile` - Temporary WAV files
+- ✅ `which` - Python executable detection
 
-# Model management
-sha2 = "0.10" # Already in workspace
-reqwest = { version = "0.12", features = ["stream"] } # Already in workspace
-
-# Audio processing enhancements
-hound = "3.5" # WAV file handling
-```
-
-### Python Dependencies
+### Python Dependencies (New)
 
 ```python
-# Core ML framework
+# Core NeMo framework for Parakeet TDT
 nemo_toolkit[asr] >= 2.2.0
 
-# Audio processing
+# Audio processing (may already be installed with NeMo)
 librosa >= 0.10.0
 soundfile >= 0.12.0
-
-# Utilities
-numpy >= 1.24.0
 torch >= 2.0.0
 ```
 
 ### System Requirements
 
-- **Memory**: Minimum 4GB RAM (2GB for model + 2GB for system)
-- **Storage**: 3GB free space (model + dependencies)
-- **Python**: Python 3.8+ with pip
-- **GPU**: Optional but recommended (CUDA-compatible for acceleration)
+Following the Parakeet TDT model specifications:
+- **Memory**: Minimum 2GB RAM for model loading
+- **Storage**: ~3GB for model and dependencies
+- **Python**: Python 3.8+ (detected automatically)
+- **GPU**: Optional CUDA support for acceleration
+- **Audio**: 16kHz mono input (handled by existing audio capture)
 
 ## Security Considerations
 
@@ -383,4 +369,21 @@ torch >= 2.0.0
 4. **Concurrent Processing**: Handle multiple requests efficiently
 5. **Resource Monitoring**: Track CPU/GPU usage and adjust processing accordingly
 
-The design ensures seamless integration with existing voice infrastructure while providing robust local processing capabilities that meet the performance and accuracy requirements specified in the requirements document.
+## Key Design Decisions
+
+### 1. Reuse Existing Infrastructure
+Rather than building new components, we leverage the comprehensive voice infrastructure already in place. This ensures consistency and reduces implementation complexity.
+
+### 2. Follow WhisperProvider Pattern
+The `WhisperProvider` serves as a perfect template for local transcription. By following its exact structure, we ensure the Parakeet implementation integrates seamlessly.
+
+### 3. NeMo Automatic Model Management
+Instead of building custom model download logic, we rely on NeMo's built-in HuggingFace integration for automatic model downloading and caching.
+
+### 4. Maintain User Experience Consistency
+Users will have the same experience with Parakeet as with Whisper - same commands, same UI, same error handling, just different underlying model.
+
+### 5. Minimal Code Changes
+The implementation requires changes only to `parakeet_provider.rs` and creation of Python scripts. No changes to CLI, audio capture, or other components.
+
+This design ensures seamless integration with existing voice infrastructure while providing robust local processing capabilities that meet the performance and accuracy requirements specified in the requirements document.

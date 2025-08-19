@@ -24,8 +24,8 @@ impl WhisperProvider {
         // Detect Python executable
         let python_executable = detect_python_executable().await?;
         
-        // Use configurable VAD threshold (default -40dB for better balance)
-        let vad_threshold_db = -40.0;
+        // Use configurable VAD threshold (default -45dB for better sensitivity)
+        let vad_threshold_db = -45.0;
         
         // Create instance
         let provider = Self {
@@ -258,21 +258,17 @@ impl TranscriptionProvider for WhisperProvider {
         let python_executable = self.python_executable.clone();
         let language = "en".to_string(); // Hardcoded to English
 
-        // Stream transcription with periodic processing
+        // Stream transcription with single-pass processing to avoid repetition
         tokio::spawn(async move {
             let mut audio_buffer = Vec::new();
-            let mut processed_buffer_size = 0;
-            let mut last_process_time = std::time::Instant::now();
             let mut last_activity_event = std::time::Instant::now();
             let session_start_time = std::time::Instant::now();
-            let process_interval = std::time::Duration::from_millis(2000);
             let activity_event_interval = std::time::Duration::from_millis(300);
-            let session_timeout = std::time::Duration::from_secs(5);
-            let max_session_time = std::time::Duration::from_secs(30);
-            let mut final_transcript = String::new();
-            let mut first_chunk = true;
+            let session_timeout = std::time::Duration::from_secs(10); // Primary timeout for voice activity
+            let max_session_time = std::time::Duration::from_secs(120); // Increased from 60s to 120s
             let mut has_recent_audio = false;
             let mut last_voice_activity_time = std::time::Instant::now();
+            let mut last_any_audio_time = std::time::Instant::now(); // Fallback for any audio activity
 
             let mut timer_interval = tokio::time::interval(std::time::Duration::from_millis(100));
             timer_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -292,6 +288,9 @@ impl TranscriptionProvider for WhisperProvider {
                                     // Always add to buffer for transcription
                                     audio_buffer.extend_from_slice(chunk_bytes);
                                     
+                                    // Update any audio activity time (fallback timeout)
+                                    last_any_audio_time = std::time::Instant::now();
+                                    
                                     // Only set has_recent_audio if VAD detects voice activity
                                     if is_voice_activity {
                                         has_recent_audio = true;
@@ -303,12 +302,12 @@ impl TranscriptionProvider for WhisperProvider {
                         }
                     }
                     
-                    // Timer ticks for activity events and processing
+                    // Timer ticks for activity events only (no chunked processing)
                     _ = timer_interval.tick() => {
-                        // Send activity events when we have recent audio
+                        // Send activity events when we have recent audio (shows user it's working)
                         if has_recent_audio && last_activity_event.elapsed() >= activity_event_interval {
                             let result = transcript_sender.send(TranscriptEvent {
-                                transcript: final_transcript.clone(),
+                                transcript: "Recording...".to_string(), // Show live feedback without repetition
                                 is_partial: true,
                             }).await;
                             if result.is_err() {
@@ -316,89 +315,24 @@ impl TranscriptionProvider for WhisperProvider {
                             }
                             last_activity_event = std::time::Instant::now();
                         }
-                        
-                        // Process audio chunks for transcription
-                        let should_process = if first_chunk {
-                            last_process_time.elapsed() > std::time::Duration::from_secs(1) && !audio_buffer.is_empty()
-                        } else {
-                            last_process_time.elapsed() > process_interval && !audio_buffer.is_empty()
-                        };
-                        
-                        if should_process {
-                            let new_audio_size = audio_buffer.len();
-                            if new_audio_size > processed_buffer_size {
-                                let new_data_threshold = 16000 * 2 * 2; // ~2 seconds of audio
-                                if new_audio_size - processed_buffer_size >= new_data_threshold || first_chunk {
-                                    
-                                    let new_audio_chunk = if first_chunk {
-                                        &audio_buffer[..]
-                                    } else {
-                                        &audio_buffer[processed_buffer_size..]
-                                    };
-                                    
-                                    if !new_audio_chunk.is_empty() {
-                                        match create_wav_file(new_audio_chunk, 16000).await {
-                                            Ok(wav_path) => {
-                                                match Self::transcribe_with_whisper(&wav_path, &python_executable, &language).await {
-                                                    Ok(new_text) if !new_text.trim().is_empty() => {
-                                                        let cleaned_text = new_text.trim().to_string();
-                                                        
-                                                        // Append new text to final transcript
-                                                        if first_chunk {
-                                                            final_transcript = cleaned_text;
-                                                        } else {
-                                                            if !final_transcript.is_empty() && 
-                                                               !final_transcript.ends_with('.') && 
-                                                               !final_transcript.ends_with('!') && 
-                                                               !final_transcript.ends_with('?') {
-                                                                final_transcript.push(' ');
-                                                            } else if !final_transcript.is_empty() {
-                                                                final_transcript.push(' ');
-                                                            }
-                                                            final_transcript.push_str(&cleaned_text);
-                                                        }
-                                                        
-                                                        println!("📝 WHISPER TRANSCRIPTION: {}", final_transcript);
-                                                        let _ = transcript_sender.send(TranscriptEvent {
-                                                            transcript: final_transcript.clone(),
-                                                            is_partial: false,
-                                                        }).await;
-                                                    }
-                                                    Ok(_) => {
-                                                        // Empty transcription - continue listening
-                                                    }
-                                                    Err(e) => {
-                                                        eprintln!("Whisper transcription error: {}", e);
-                                                    }
-                                                }
-                                                let _ = std::fs::remove_file(wav_path);
-                                            }
-                                            Err(e) => {
-                                                eprintln!("WAV file creation failed: {}", e);
-                                            }
-                                        }
-                                    }
-                                    processed_buffer_size = new_audio_size;
-                                }
-                            }
-                            last_process_time = std::time::Instant::now();
-                            first_chunk = false;
-                        }
-
                         // Reset audio activity flag if no recent voice activity
                         if last_voice_activity_time.elapsed() > std::time::Duration::from_millis(1000) {
                             has_recent_audio = false;
                         }
 
-                        // Check for session timeout conditions
-                        let silence_time = last_voice_activity_time.elapsed();
+                        // Check for session timeout conditions with fallback
+                        let voice_silence_time = last_voice_activity_time.elapsed();
+                        let any_audio_silence_time = last_any_audio_time.elapsed();
                         let total_session_time = session_start_time.elapsed();
                         
-                        if silence_time >= session_timeout || total_session_time >= max_session_time {
-                            if silence_time >= session_timeout {
-                                println!("🔇 No voice activity for {}s - ending voice input", silence_time.as_secs());
+                        // Use the shorter of voice silence or any audio silence (with longer timeout for any audio)
+                        let effective_silence_time = voice_silence_time.min(any_audio_silence_time + std::time::Duration::from_secs(10));
+                        
+                        if effective_silence_time >= session_timeout || total_session_time >= max_session_time {
+                            if total_session_time >= max_session_time {
+                                println!("\n🔇 Maximum session time reached - ending voice input");
                             } else {
-                                println!("🔇 Maximum session time reached ({}s) - ending voice input", total_session_time.as_secs());
+                                println!("\n🔇 No voice activity detected - ending voice input");
                             }
                             break;
                         }
@@ -406,14 +340,9 @@ impl TranscriptionProvider for WhisperProvider {
                 }
             }
 
-            // Send final result when recording stops
-            if !final_transcript.is_empty() {
-                let _ = transcript_sender.send(TranscriptEvent {
-                    transcript: final_transcript,
-                    is_partial: false,
-                }).await;
-            } else if !audio_buffer.is_empty() {
-                // Process remaining audio one final time
+            // Send final result when recording stops - SINGLE TRANSCRIPTION ONLY
+            if !audio_buffer.is_empty() {
+                // Process the ENTIRE audio buffer only once to avoid repetition
                 match create_wav_file(&audio_buffer, 16000).await {
                     Ok(wav_path) => {
                         match Self::transcribe_with_whisper(&wav_path, &python_executable, &language).await {

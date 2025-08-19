@@ -238,14 +238,14 @@ impl VoiceHandler {
                             // End if no audio activity for 5 seconds
                             if last_activity_time.elapsed() > activity_timeout {
                                 debug!("Activity timeout reached, ending transcription");
-                                println!("\n🔇 No voice activity for 5s - ending voice input");
+                                println!("\n🔇 No voice activity detected - ending voice input");
                                 break;
                             }
                             
                             // End if no speech for 5 seconds but we have some transcript
                             if last_speech_time.elapsed() > speech_timeout && !current_transcript.trim().is_empty() {
                                 debug!("Speech timeout reached with existing transcript, ending transcription");
-                                println!("\n🔇 No voice activity for 5s - ending voice input");
+                                println!("\n🔇 No voice activity detected - ending voice input");
                                 break;
                             }
                         }
@@ -335,49 +335,25 @@ impl VoiceHandler {
         println!();
         io::stdout().flush().ok();
 
-        // Use rustyline for consistent input handling
-        let (input_tx, mut input_rx) = mpsc::channel::<Option<String>>(1);
-
-        let input_handle = tokio::spawn(async move {
-            use std::io::{stdin, BufRead, BufReader};
-            
-            let read_future = tokio::task::spawn_blocking(|| {
-                print!("> ");
-                io::stdout().flush().ok();
-                
-                let stdin = stdin();
-                let mut reader = BufReader::new(stdin);
-                let mut line = String::new();
-                
-                match reader.read_line(&mut line) {
-                    Ok(_) => Some(line.trim().to_lowercase()),
-                    Err(_) => None,
-                }
-            });
-
-            match read_future.await {
-                Ok(choice) => {
-                    let _ = input_tx.send(choice).await;
-                },
-                Err(_) => {
-                    let _ = input_tx.send(None).await;
-                },
+        // Direct input handling to avoid double-enter issue
+        use std::io::{stdin, BufRead};
+        
+        // Make sure to flush the prompt and clear any buffered input
+        print!("> ");
+        io::stdout().flush()?;
+        
+        // Read input directly in a blocking manner
+        let choice = tokio::task::spawn_blocking(|| {
+            let stdin = stdin();
+            let mut line = String::new();
+            match stdin.lock().read_line(&mut line) {
+                Ok(_) => line.trim().to_lowercase(),
+                Err(_) => String::new(),
             }
-        });
+        }).await.unwrap_or_default();
 
-        // Wait for user input or Ctrl+C
-        let choice = match input_rx.recv().await {
-            Some(Some(choice)) => choice,
-            Some(None) | None => {
-                // Ctrl+C was pressed or input failed
-                input_handle.abort();
-                println!();
-                println!("❌ Transcript editing cancelled");
-                return Ok(None);
-            },
-        };
-
-        input_handle.abort();
+        // Extra line break after input
+        println!();
 
         if choice.is_empty() {
             // User pressed Enter without input - use original transcript
