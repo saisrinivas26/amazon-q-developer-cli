@@ -23,8 +23,10 @@ use super::transcriber::send_audio_to_transcribe;
 use super::{
     AudioCapture,
     VoiceError,
-    VoiceTranscriber,
 };
+use super::transcription_provider::{TranscriptionProvider, TranscriptionBackend};
+use super::aws_transcribe_provider::AwsTranscribeProvider;
+use super::parakeet_provider::ParakeetProvider;
 
 #[derive(Debug)]
 enum InputEvent {
@@ -34,17 +36,25 @@ enum InputEvent {
 }
 
 pub struct VoiceHandler {
-    transcriber: VoiceTranscriber,
+    provider: Box<dyn TranscriptionProvider + Send + Sync>,
     audio_capture: AudioCapture,
 }
 
 impl VoiceHandler {
-    pub async fn new(aws_config: &SdkConfig, language: &str) -> Result<Self> {
-        let transcriber = VoiceTranscriber::new(aws_config, language).await?;
+    pub async fn new(aws_config: &SdkConfig, language: &str, backend: TranscriptionBackend) -> Result<Self> {
+        let provider: Box<dyn TranscriptionProvider + Send + Sync> = match backend {
+            TranscriptionBackend::AwsTranscribe => {
+                Box::new(AwsTranscribeProvider::new(aws_config, language).await?)
+            }
+            TranscriptionBackend::LocalParakeet => {
+                Box::new(ParakeetProvider::new(language).await?)
+            }
+        };
+        
         let audio_capture = AudioCapture::new()?;
 
         Ok(Self {
-            transcriber,
+            provider,
             audio_capture,
         })
     }
@@ -54,8 +64,8 @@ impl VoiceHandler {
         println!("   (Press Ctrl+C to cancel or Enter to stop recording)");
         println!();
 
-        // Start real AWS Transcribe streaming session
-        let transcription_result = self.transcriber.start_transcription().await?;
+        // Start transcription using the configured provider
+        let transcription_result = self.provider.start_transcription().await?;
 
         // Create audio processing channels
         let (audio_tx, mut audio_rx) = mpsc::channel::<Vec<u8>>(1000);
@@ -74,7 +84,8 @@ impl VoiceHandler {
         // Recording UI with simple, reliable display
         let mut current_transcript = String::new();
         let mut last_speech_time = Instant::now();
-        let silence_timeout = Duration::from_secs(5);
+        let mut last_activity_time = Instant::now(); // Track any audio activity
+        let _silence_timeout = Duration::from_secs(10); // Longer timeout for Parakeet processing
         let recording_start = Instant::now();
         let mut voice_activity_level = 0u8;
 
@@ -165,8 +176,13 @@ impl VoiceHandler {
                                     voice_activity_level,
                                 );
 
-                                // Reset silence timer on speech
-                                last_speech_time = Instant::now();
+                                // Reset activity timer for any partial event (including empty ones showing audio activity)
+                                last_activity_time = Instant::now();
+                                
+                                // Only reset speech timer for non-empty partial results
+                                if !transcript_event.transcript.trim().is_empty() {
+                                    last_speech_time = Instant::now();
+                                }
                             } else {
                                 // Final result - add to the continuous transcript
                                 if !transcript_event.transcript.trim().is_empty() {
@@ -208,8 +224,19 @@ impl VoiceHandler {
                                 voice_activity_level,
                             );
 
-                            if last_speech_time.elapsed() > silence_timeout && !current_transcript.trim().is_empty() {
-                                debug!("Silence timeout reached, ending transcription");
+                            // More sophisticated timeout logic for Parakeet
+                            let activity_timeout = Duration::from_secs(25); // No audio activity at all - extended for Parakeet
+                            let speech_timeout = Duration::from_secs(25);    // No meaningful speech - extended for Parakeet
+                            
+                            // End if no audio activity for 5 seconds
+                            if last_activity_time.elapsed() > activity_timeout {
+                                debug!("Activity timeout reached, ending transcription");
+                                break;
+                            }
+                            
+                            // End if no speech for 5 seconds but we have some transcript
+                            if last_speech_time.elapsed() > speech_timeout && !current_transcript.trim().is_empty() {
+                                debug!("Speech timeout reached with existing transcript, ending transcription");
                                 break;
                             }
                         }
@@ -527,7 +554,7 @@ impl VoiceHandler {
         }
 
         // Check real AWS Transcribe permissions
-        self.transcriber.check_permissions().await?;
+        // TODO: Add provider-specific permission checks
 
         info!("Voice setup check completed successfully");
         Ok(())

@@ -10,6 +10,7 @@ use crate::aws_common::behavior_version;
 use crate::cli::chat::voice::{
     VoiceHandler,
     show_voice_setup_help,
+    TranscriptionBackend,
 };
 use crate::cli::chat::{
     ChatError,
@@ -28,6 +29,27 @@ pub struct VoiceArgs {
     /// Set the default voice language for future sessions
     #[arg(long)]
     pub set_language: Option<String>,
+
+    /// Transcription backend to use
+    #[arg(long, value_enum, default_value = "aws-transcribe")]
+    pub backend: TranscriptionBackendArg,
+}
+
+#[derive(Debug, Clone, PartialEq, clap::ValueEnum)]
+pub enum TranscriptionBackendArg {
+    #[value(name = "aws-transcribe")]
+    AwsTranscribe,
+    #[value(name = "local-parakeet")]
+    LocalParakeet,
+}
+
+impl From<TranscriptionBackendArg> for TranscriptionBackend {
+    fn from(arg: TranscriptionBackendArg) -> Self {
+        match arg {
+            TranscriptionBackendArg::AwsTranscribe => TranscriptionBackend::AwsTranscribe,
+            TranscriptionBackendArg::LocalParakeet => TranscriptionBackend::LocalParakeet,
+        }
+    }
 }
 
 impl VoiceArgs {
@@ -74,7 +96,7 @@ impl VoiceArgs {
         // Create AWS config for transcribe service
         let aws_config = aws_config::defaults(behavior_version()).load().await;
 
-        match VoiceHandler::new(&aws_config, &language).await {
+        match VoiceHandler::new(&aws_config, &language, self.backend.clone().into()).await {
             Ok(voice_handler) => {
                 // Check voice setup
                 if let Err(e) = voice_handler.check_setup().await {

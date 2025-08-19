@@ -1,11 +1,14 @@
 pub mod audio_capture;
 pub mod transcriber;
 pub mod voice_handler;
+pub mod transcription_provider;
+pub mod aws_transcribe_provider;
+pub mod parakeet_provider;
 
 pub use audio_capture::AudioCapture;
 use thiserror::Error;
-pub use transcriber::VoiceTranscriber;
 pub use voice_handler::VoiceHandler;
+pub use transcription_provider::TranscriptionBackend;
 
 #[derive(Debug, Error)]
 pub enum VoiceError {
