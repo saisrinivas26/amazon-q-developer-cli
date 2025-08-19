@@ -13,6 +13,7 @@ pub trait TranscriptionProvider {
 pub enum TranscriptionBackend {
     AwsTranscribe,
     LocalParakeet,
+    LocalWhisper,
 }
 
 impl Default for TranscriptionBackend {

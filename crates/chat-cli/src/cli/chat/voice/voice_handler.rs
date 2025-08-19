@@ -27,6 +27,7 @@ use super::{
 use super::transcription_provider::{TranscriptionProvider, TranscriptionBackend};
 use super::aws_transcribe_provider::AwsTranscribeProvider;
 use super::parakeet_provider::ParakeetProvider;
+use super::whisper_provider::WhisperProvider;
 
 #[derive(Debug)]
 enum InputEvent {
@@ -48,6 +49,9 @@ impl VoiceHandler {
             }
             TranscriptionBackend::LocalParakeet => {
                 Box::new(ParakeetProvider::new(language).await?)
+            }
+            TranscriptionBackend::LocalWhisper => {
+                Box::new(WhisperProvider::new(language).await?)
             }
         };
         
@@ -96,7 +100,7 @@ impl VoiceHandler {
         println!();
 
         // Simple status line that updates in place
-        print!("⏱️  Recording: 0.0s | 🎙️  [░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░] | 💬 ");
+        print!("⏱️  0.0s | 🎙️  [░░░░░░░░░░░░░░░░░░░░] | 💬 ");
         io::stdout().flush().ok();
 
         // Create channels for user input handling using rustyline

@@ -1399,6 +1399,7 @@ dependencies = [
  "uuid",
  "walkdir",
  "webpki-roots 0.26.8",
+ "which 6.0.3",
  "whoami",
  "windows 0.61.3",
  "winnow 0.6.2",
@@ -7378,6 +7379,18 @@ dependencies = [
  "home",
  "once_cell",
  "rustix 0.38.44",
+]
+
+[[package]]
+name = "which"
+version = "6.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4ee928febd44d98f2f459a4a79bd4d928591333a494a10a868418ac1b39cf1f"
+dependencies = [
+ "either",
+ "home",
+ "rustix 0.38.44",
+ "winsafe",
 ]
 
 [[package]]

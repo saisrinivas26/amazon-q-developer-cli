@@ -1,4 +1,4 @@
-//! NVIDIA Parakeet-based transcription provider using NeMo models
+//! Whisper-based transcription provider using OpenAI Whisper models
 
 use async_trait::async_trait;
 use eyre::{eyre, Result};
@@ -6,7 +6,6 @@ use tokio::sync::mpsc;
 use aws_sdk_transcribestreaming::types::AudioEvent;
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
-use std::io::Write;
 use std::path::PathBuf;
 
 use super::transcription_provider::{TranscriptionProvider, TranscriptionResult, TranscriptEvent};
@@ -15,13 +14,13 @@ use super::common::{
     check_python_dependencies, is_model_cached, check_metal_support
 };
 
-pub struct ParakeetProvider {
-    _language: String,
+pub struct WhisperProvider {
+    language: String,
     vad_threshold_db: f64,
     python_executable: PathBuf,
 }
 
-impl ParakeetProvider {
+impl WhisperProvider {
     pub async fn new(language: &str) -> Result<Self> {
         // Detect Python executable
         let python_executable = detect_python_executable().await?;
@@ -31,25 +30,22 @@ impl ParakeetProvider {
         
         // Create instance
         let provider = Self {
-            _language: language.to_string(),
+            language: language.to_string(),
             vad_threshold_db,
             python_executable,
         };
         
-        // Check dependencies and setup model
+        // Check dependencies and pre-load model
         provider.check_dependencies().await?;
-        provider.setup_model().await?;
         provider.preload_model().await?;
         
         Ok(provider)
     }
 
     async fn check_dependencies(&self) -> Result<()> {
-        // Check required packages for NVIDIA NeMo Parakeet
-        let packages = ["torch", "nemo_toolkit", "librosa", "soundfile"];
-        check_python_dependencies(&self.python_executable, &packages).await.map_err(|_| {
-            eyre!("NVIDIA Parakeet requires NeMo toolkit. Install with:\n  pip install nemo_toolkit[\"asr\"]")
-        })?;
+        // Check required packages for Whisper
+        let packages = ["torch", "transformers", "librosa", "soundfile"];
+        check_python_dependencies(&self.python_executable, &packages).await?;
         
         // Check for Metal (Mac GPU) support
         check_metal_support(&self.python_executable).await;
@@ -57,136 +53,72 @@ impl ParakeetProvider {
         Ok(())
     }
 
-    async fn setup_model(&self) -> Result<()> {
-        // First check if model is already cached
-        if self.is_model_cached().await {
-            println!("✅ Using cached NVIDIA Parakeet model");
-            return Ok(());
-        }
-
-        println!("🔄 Downloading NVIDIA Parakeet model (first time setup)...");
-        
-        // Use async progress reporting
-        let (progress_tx, mut progress_rx) = mpsc::channel::<u32>(100);
-        
-        let progress_handle = tokio::spawn(async move {
-            while let Some(progress) = progress_rx.recv().await {
-                let filled = (progress * 20) / 100;
-                let empty = 20 - filled;
-                
-                print!("\r🔄 Loading NVIDIA Parakeet model [{}{}] {}%", 
-                    "█".repeat(filled as usize), 
-                    "░".repeat(empty as usize), 
-                    progress
-                );
-                std::io::stdout().flush().ok();
-            }
-        });
-
-        let setup_script = r#"
-import os
-import sys
-import logging
-import warnings
-
-# Suppress NeMo warnings during download
-os.environ['NEMO_LOG_LEVEL'] = 'ERROR'
-warnings.filterwarnings("ignore")
-
-try:
-    import nemo.collections.asr as nemo_asr
-    from contextlib import redirect_stderr, redirect_stdout
-    from io import StringIO
-
-    print("Downloading NVIDIA Parakeet model...", file=sys.stderr)
-    
-    # Download and cache the model with reduced verbosity
-    with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
-        asr_model = nemo_asr.models.ASRModel.from_pretrained("nvidia/parakeet-tdt-0.6b-v2")
-
-    print("PARAKEET_MODEL_READY")
-except Exception as e:
-    print(f"ERROR:{str(e)}", file=sys.stderr)
-    raise
-"#;
-
-        let result = timeout(
-            Duration::from_secs(300), // 5 minutes for model download
-            Command::new(&self.python_executable)
-                .args(&["-c", setup_script])
-                .output()
-        ).await;
-
-        let _ = progress_tx.send(100).await;
-        progress_handle.await?;
-        
-        print!("\r");
-        println!();
-
-        match result {
-            Ok(Ok(output)) if output.status.success() && 
-                String::from_utf8_lossy(&output.stdout).contains("PARAKEET_MODEL_READY") => {
-                println!("✅ NVIDIA Parakeet model ready");
-                Ok(())
-            }
-            Ok(Ok(output)) => {
-                let error = String::from_utf8_lossy(&output.stderr);
-                Err(eyre!("Failed to setup NVIDIA Parakeet model: {}\n\nInstall with: pip install nemo_toolkit[\"asr\"]", error))
-            }
-            Ok(Err(e)) => Err(eyre!("Python command failed: {}", e)),
-            Err(_) => Err(eyre!("NVIDIA Parakeet model setup timed out after 5 minutes")),
-        }
-    }
-
     async fn preload_model(&self) -> Result<()> {
-        println!("🔄 Pre-loading NVIDIA Parakeet model...");
+        println!("🔄 Pre-loading Whisper model...");
         
         let python_script = r#"
 import torch
 import sys
 import logging
 import os
-import warnings
 
-# Configure logging and suppress warnings
+# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-os.environ['NEMO_LOG_LEVEL'] = 'ERROR'
-warnings.filterwarnings("ignore")
+os.environ['TRANSFORMERS_VERBOSITY'] = 'error'
 
-# Force CPU-only mode for stability on Mac (NeMo can have GPU issues)
+# Force CPU-only mode for stability (avoid MPS issues on Mac)
 device = "cpu"
-logger.info("Using CPU for stable NVIDIA Parakeet speech recognition")
+logger.info("Using CPU for stable Whisper speech recognition")
 
 model_loaded = False
 
+# Try OpenAI Whisper library first
 try:
-    import nemo.collections.asr as nemo_asr
-    from contextlib import redirect_stderr, redirect_stdout
-    from io import StringIO
+    import whisper
+    model = whisper.load_model("base", device="cpu")
     
-    # Load NVIDIA Parakeet model with CPU-only
-    with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
-        asr_model = nemo_asr.models.ASRModel.from_pretrained("nvidia/parakeet-tdt-0.6b-v2")
-        # Force CPU usage for the model
-        asr_model = asr_model.to(device)
-    
-    globals()['cached_parakeet_model'] = asr_model
-    globals()['device'] = device
-    globals()['model_type'] = 'nemo_parakeet'
+    globals()['cached_whisper_model'] = model
+    globals()['device'] = "cpu"
+    globals()['model_type'] = 'whisper'
     model_loaded = True
-    logger.info("NVIDIA Parakeet model loaded successfully on CPU")
+    logger.info("OpenAI Whisper model loaded successfully on CPU")
     
-except Exception as nemo_error:
-    logger.error(f"NVIDIA Parakeet loading failed: {str(nemo_error)[:100]}...")
-    print(f"ERROR:NVIDIA Parakeet model failed to load: {str(nemo_error)}", file=sys.stderr)
-    raise Exception("NVIDIA Parakeet model failed to load")
+except ImportError:
+    logger.info("OpenAI Whisper not available, trying Transformers...")
+except Exception as whisper_error:
+    logger.warning(f"Whisper loading failed: {str(whisper_error)[:100]}...")
+    logger.info("Trying Transformers-based approach...")
+
+# Fallback to transformers if direct Whisper fails
+if not model_loaded:
+    try:
+        from transformers import pipeline
+        
+        # Use CPU-optimized pipeline
+        pipe = pipeline(
+            "automatic-speech-recognition",
+            model="openai/whisper-base",
+            device=-1,  # Force CPU for stability
+            torch_dtype=torch.float32,
+            return_timestamps=False
+        )
+        globals()['cached_whisper_model'] = pipe
+        globals()['device'] = "cpu"
+        globals()['model_type'] = 'transformers'
+        model_loaded = True
+        logger.info("Transformers Whisper pipeline loaded successfully on CPU")
+        
+    except Exception as transformers_error:
+        logger.error(f"Transformers loading failed: {str(transformers_error)[:100]}...")
+        print(f"ERROR:Both Whisper approaches failed to load", file=sys.stderr)
+        raise Exception("Both Whisper approaches failed to load")
 
 if model_loaded:
-    print("PARAKEET_MODEL_PRELOADED")
+    print("WHISPER_MODEL_READY")
 else:
-    raise Exception("Failed to load NVIDIA Parakeet model")
+    raise Exception("Failed to load Whisper model")
 "#;
 
         let result = timeout(
@@ -198,70 +130,94 @@ else:
 
         match result {
             Ok(Ok(output)) if output.status.success() && 
-                String::from_utf8_lossy(&output.stdout).contains("PARAKEET_MODEL_PRELOADED") => {
-                println!("✅ NVIDIA Parakeet model pre-loaded and ready");
+                String::from_utf8_lossy(&output.stdout).contains("WHISPER_MODEL_READY") => {
+                println!("✅ Whisper model pre-loaded and ready");
                 Ok(())
             }
             Ok(Ok(output)) => {
                 let error = String::from_utf8_lossy(&output.stderr);
-                Err(eyre!("Failed to pre-load NVIDIA Parakeet model: {}", error))
+                Err(eyre!("Failed to pre-load Whisper model: {}", error))
             }
             Ok(Err(e)) => Err(eyre!("Python command failed: {}", e)),
-            Err(_) => Err(eyre!("NVIDIA Parakeet model preloading timed out after 60 seconds")),
+            Err(_) => Err(eyre!("Whisper model preloading timed out after 60 seconds")),
         }
     }
 
     async fn is_model_cached(&self) -> bool {
-        let model_patterns = ["nvidia/parakeet-tdt-0.6b-v2"];
+        let model_patterns = ["openai/whisper-base"];
         is_model_cached(&self.python_executable, &model_patterns).await
     }
 
-    async fn transcribe_with_parakeet(wav_path: &str, python_executable: &PathBuf) -> Result<String> {
+    async fn transcribe_with_whisper(wav_path: &str, python_executable: &PathBuf, language: &str) -> Result<String> {
+        // Convert language code from "en-US" to "en" for Whisper
+        let whisper_language = language.split('-').next().unwrap_or("en");
+        
         let python_script = format!(
             r#"
 import sys
 import logging
 import os
-import warnings
 
 # Enhanced error handling
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-os.environ['NEMO_LOG_LEVEL'] = 'ERROR'
-warnings.filterwarnings("ignore")
+os.environ['TRANSFORMERS_VERBOSITY'] = 'error'
 
-# Force CPU-only to avoid GPU memory issues
+# Force CPU-only to avoid MPS logits issues
 device = "cpu"
+language = "{1}"
 
 try:
-    import nemo.collections.asr as nemo_asr
-    from contextlib import redirect_stderr, redirect_stdout
-    from io import StringIO
+    # Try OpenAI Whisper first with CPU-only for stability
+    import whisper
+    model = whisper.load_model("base", device="cpu")
     
-    # Load NVIDIA Parakeet model for transcription
-    with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
-        asr_model = nemo_asr.models.ASRModel.from_pretrained("nvidia/parakeet-tdt-0.6b-v2")
-        asr_model = asr_model.to(device)
+    # Transcribe with CPU-only and language constraint
+    result = model.transcribe("{0}", language=language)
+    transcript = result.get('text', '').strip()
     
-    # Transcribe using NVIDIA Parakeet
-    transcript_list = asr_model.transcribe(["{0}"])
-    
-    if transcript_list and len(transcript_list) > 0:
-        transcript = transcript_list[0].strip()
+    if transcript:
+        print("TRANSCRIPT:" + transcript, flush=True)
+    else:
+        print("TRANSCRIPT:", flush=True)
+        
+except ImportError:
+    # Fallback to transformers with CPU-only
+    try:
+        from transformers import pipeline
+        pipe = pipeline(
+            "automatic-speech-recognition",
+            model="openai/whisper-base",
+            device=-1,  # Force CPU for stability
+            torch_dtype=torch.float32
+        )
+        # Note: transformers pipeline doesn't support language parameter the same way
+        # but we can try to force generate_kwargs if available
+        try:
+            result = pipe("{0}", generate_kwargs={{"language": language}})
+        except:
+            # Fallback without language constraint for transformers
+            result = pipe("{0}")
+        
+        transcript = result.get('text', '').strip()
+        
         if transcript:
             print("TRANSCRIPT:" + transcript, flush=True)
         else:
             print("TRANSCRIPT:", flush=True)
-    else:
-        print("TRANSCRIPT:", flush=True)
+            
+    except Exception as e:
+        logger.error(f"Transformers transcription failed: {{e}}")
+        print(f"ERROR:{{str(e)}}", file=sys.stderr)
+        raise
         
 except Exception as e:
-    logger.error(f"NVIDIA Parakeet transcription failed: {{e}}")
+    logger.error(f"Whisper transcription failed: {{e}}")
     print(f"ERROR:{{str(e)}}", file=sys.stderr)
     raise
 "#,
-            wav_path
+            wav_path, whisper_language
         );
 
         let result = timeout(
@@ -281,20 +237,20 @@ except Exception as e:
                         let transcript = line.strip_prefix("TRANSCRIPT:").unwrap_or("").trim();
                         return Ok(transcript.to_string());
                     } else if line.starts_with("ERROR:") {
-                        return Err(eyre!("NVIDIA Parakeet transcription error: {}", line.strip_prefix("ERROR:").unwrap_or("")));
+                        return Err(eyre!("Transcription error: {}", line.strip_prefix("ERROR:").unwrap_or("")));
                     }
                 }
                 
                 Ok(String::new())
             }
             Ok(Err(e)) => Err(eyre!("Python command failed: {}", e)),
-            Err(_) => Err(eyre!("NVIDIA Parakeet transcription timed out after 30 seconds")),
+            Err(_) => Err(eyre!("Whisper transcription timed out after 30 seconds")),
         }
     }
 }
 
 #[async_trait]
-impl TranscriptionProvider for ParakeetProvider {
+impl TranscriptionProvider for WhisperProvider {
     async fn start_transcription(&self) -> Result<TranscriptionResult> {
         let (audio_sender, mut audio_receiver) = mpsc::channel::<AudioEvent>(1000);
         let (transcript_sender, transcript_receiver) = mpsc::channel::<TranscriptEvent>(100);
@@ -302,6 +258,7 @@ impl TranscriptionProvider for ParakeetProvider {
         // Capture instance fields needed in the async task
         let vad_threshold_db = self.vad_threshold_db;
         let python_executable = self.python_executable.clone();
+        let language = self.language.clone();
 
         // Stream transcription with periodic processing
         tokio::spawn(async move {
@@ -384,7 +341,7 @@ impl TranscriptionProvider for ParakeetProvider {
                                     if !new_audio_chunk.is_empty() {
                                         match create_wav_file(new_audio_chunk, 16000).await {
                                             Ok(wav_path) => {
-                                                match Self::transcribe_with_parakeet(&wav_path, &python_executable).await {
+                                                match Self::transcribe_with_whisper(&wav_path, &python_executable, &language).await {
                                                     Ok(new_text) if !new_text.trim().is_empty() => {
                                                         let cleaned_text = new_text.trim().to_string();
                                                         
@@ -403,7 +360,7 @@ impl TranscriptionProvider for ParakeetProvider {
                                                             final_transcript.push_str(&cleaned_text);
                                                         }
                                                         
-                                                        println!("📝 NVIDIA PARAKEET TRANSCRIPTION: {}", final_transcript);
+                                                        println!("📝 WHISPER TRANSCRIPTION: {}", final_transcript);
                                                         let _ = transcript_sender.send(TranscriptEvent {
                                                             transcript: final_transcript.clone(),
                                                             is_partial: false,
@@ -413,7 +370,7 @@ impl TranscriptionProvider for ParakeetProvider {
                                                         // Empty transcription - continue listening
                                                     }
                                                     Err(e) => {
-                                                        eprintln!("NVIDIA Parakeet transcription error: {}", e);
+                                                        eprintln!("Whisper transcription error: {}", e);
                                                     }
                                                 }
                                                 let _ = std::fs::remove_file(wav_path);
@@ -461,7 +418,7 @@ impl TranscriptionProvider for ParakeetProvider {
                 // Process remaining audio one final time
                 match create_wav_file(&audio_buffer, 16000).await {
                     Ok(wav_path) => {
-                        match Self::transcribe_with_parakeet(&wav_path, &python_executable).await {
+                        match Self::transcribe_with_whisper(&wav_path, &python_executable, &language).await {
                             Ok(transcript) if !transcript.trim().is_empty() => {
                                 let _ = transcript_sender.send(TranscriptEvent {
                                     transcript: transcript.trim().to_string(),
@@ -475,7 +432,7 @@ impl TranscriptionProvider for ParakeetProvider {
                                 }).await;
                             }
                             Err(e) => {
-                                eprintln!("NVIDIA Parakeet transcription error: {}", e);
+                                eprintln!("Whisper transcription error: {}", e);
                                 let _ = transcript_sender.send(TranscriptEvent {
                                     transcript: "Transcription failed".to_string(),
                                     is_partial: false,

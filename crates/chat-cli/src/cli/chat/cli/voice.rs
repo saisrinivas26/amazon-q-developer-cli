@@ -41,6 +41,8 @@ pub enum TranscriptionBackendArg {
     AwsTranscribe,
     #[value(name = "local-parakeet")]
     LocalParakeet,
+    #[value(name = "local-whisper")]
+    LocalWhisper,
 }
 
 impl From<TranscriptionBackendArg> for TranscriptionBackend {
@@ -48,6 +50,7 @@ impl From<TranscriptionBackendArg> for TranscriptionBackend {
         match arg {
             TranscriptionBackendArg::AwsTranscribe => TranscriptionBackend::AwsTranscribe,
             TranscriptionBackendArg::LocalParakeet => TranscriptionBackend::LocalParakeet,
+            TranscriptionBackendArg::LocalWhisper => TranscriptionBackend::LocalWhisper,
         }
     }
 }

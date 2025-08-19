@@ -1,9 +1,11 @@
 pub mod audio_capture;
+pub mod common;
 pub mod transcriber;
 pub mod voice_handler;
 pub mod transcription_provider;
 pub mod aws_transcribe_provider;
 pub mod parakeet_provider;
+pub mod whisper_provider;
 
 pub use audio_capture::AudioCapture;
 use thiserror::Error;
