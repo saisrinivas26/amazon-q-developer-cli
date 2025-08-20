@@ -66,6 +66,70 @@ impl VoiceHandler {
         })
     }
 
+    pub fn supports_streaming(&self) -> bool {
+        // AWS Transcribe and Parakeet support streaming, Whisper does not
+        self.provider.supports_streaming()
+    }
+
+    pub async fn listen_for_speech_streaming(&self) -> Result<Option<String>> {
+        if !self.supports_streaming() {
+            return self.listen_for_speech().await;
+        }
+
+        println!("🔄 Starting streaming transcription...");
+        println!("   (Speak continuously, press Ctrl+C to cancel)");
+        
+        // Use existing transcription infrastructure with streaming display
+        let transcription_result = self.provider.start_transcription().await?;
+        let (audio_tx, mut audio_rx) = mpsc::channel::<Vec<u8>>(1000);
+        let _stream = self.audio_capture.start_capture(audio_tx)?;
+
+        let transcribe_sender = transcription_result.audio_sender.clone();
+        let mut transcript_receiver = transcription_result.transcript_receiver;
+
+        // Forward audio data
+        let audio_forward_handle = tokio::spawn(async move { 
+            send_audio_to_transcribe(&mut audio_rx, &transcribe_sender).await 
+        });
+
+        let mut final_transcript = String::new();
+        let mut last_update = Instant::now();
+        let recording_start = Instant::now();
+
+        println!("🔴 Streaming... speak now");
+        
+        // Streaming display loop with enhanced feedback
+        loop {
+            match timeout(Duration::from_millis(100), transcript_receiver.recv()).await {
+                Ok(Some(transcript_event)) => {
+                    let transcript_text = &transcript_event.transcript;
+                    if !transcript_text.trim().is_empty() && transcript_text != &final_transcript {
+                        // Update display every 200ms max with streaming indicator
+                        if last_update.elapsed() >= Duration::from_millis(200) {
+                            print!("\r💬 {} ...", transcript_text);
+                            io::stdout().flush().ok();
+                            last_update = Instant::now();
+                        }
+                        final_transcript = transcript_text.clone();
+                    }
+                },
+                Ok(None) => break, // Channel closed
+                Err(_) => {
+                    // Timeout - check if we should stop
+                    if recording_start.elapsed() > Duration::from_secs(30) {
+                        println!("\n⏰ Recording timeout reached");
+                        break;
+                    }
+                }
+            }
+        }
+
+        audio_forward_handle.abort();
+        println!("\n✅ Streaming complete");
+        
+        Ok(Some(final_transcript))
+    }
+
     pub async fn listen_for_speech(&self) -> Result<Option<String>> {
         println!("🎤 Voice mode activated. Speak now...");
         println!("   (Press Ctrl+C to cancel or Enter to stop recording)");

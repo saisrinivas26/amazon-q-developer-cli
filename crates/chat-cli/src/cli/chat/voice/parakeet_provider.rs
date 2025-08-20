@@ -506,4 +506,8 @@ impl TranscriptionProvider for ParakeetProvider {
             transcript_receiver,
         })
     }
+
+    fn supports_streaming(&self) -> bool {
+        true // Parakeet TDT supports real-time streaming
+    }
 }

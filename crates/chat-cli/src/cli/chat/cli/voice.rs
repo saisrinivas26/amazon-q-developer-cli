@@ -33,6 +33,10 @@ pub struct VoiceArgs {
     /// Transcription backend to use
     #[arg(long, value_enum, default_value = "aws-transcribe")]
     pub backend: TranscriptionBackendArg,
+
+    /// Enable streaming transcription (real-time)
+    #[arg(long)]
+    pub streaming: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, clap::ValueEnum)]
@@ -118,8 +122,31 @@ impl VoiceArgs {
                     });
                 }
 
+                // Choose streaming or batch based on flag and support
+                let transcription_result = if self.streaming && voice_handler.supports_streaming() {
+                    execute!(
+                        session.stderr,
+                        style::SetForegroundColor(Color::Cyan),
+                        style::Print("🔄 Streaming mode enabled - real-time transcription\n"),
+                        style::SetForegroundColor(Color::Reset)
+                    )?;
+                    
+                    voice_handler.listen_for_speech_streaming().await
+                } else {
+                    if self.streaming && !voice_handler.supports_streaming() {
+                        execute!(
+                            session.stderr,
+                            style::SetForegroundColor(Color::Yellow),
+                            style::Print("⚠️  Streaming not supported by this backend, using batch mode\n"),
+                            style::SetForegroundColor(Color::Reset)
+                        )?;
+                    }
+                    
+                    voice_handler.listen_for_speech().await
+                };
+
                 // Listen for voice input
-                match voice_handler.listen_for_speech().await {
+                match transcription_result {
                     Ok(Some(voice_input)) => {
                         execute!(
                             session.stderr,

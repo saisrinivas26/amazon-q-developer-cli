@@ -7,6 +7,11 @@ pub use super::transcriber::{TranscriptEvent, TranscriptionResult};
 #[async_trait]
 pub trait TranscriptionProvider {
     async fn start_transcription(&self) -> Result<TranscriptionResult>;
+    
+    /// Check if this provider supports real-time streaming
+    fn supports_streaming(&self) -> bool {
+        false // Default to batch mode
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

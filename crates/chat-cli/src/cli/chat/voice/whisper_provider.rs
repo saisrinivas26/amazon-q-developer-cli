@@ -392,4 +392,8 @@ impl TranscriptionProvider for WhisperProvider {
             transcript_receiver,
         })
     }
+
+    fn supports_streaming(&self) -> bool {
+        false // Whisper is batch-only, does not support real-time streaming
+    }
 }

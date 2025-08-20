@@ -22,4 +22,8 @@ impl TranscriptionProvider for AwsTranscribeProvider {
     async fn start_transcription(&self) -> Result<TranscriptionResult> {
         self.transcriber.start_transcription().await
     }
+
+    fn supports_streaming(&self) -> bool {
+        true // AWS Transcribe supports real-time streaming
+    }
 }
