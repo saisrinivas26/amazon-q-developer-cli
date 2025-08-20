@@ -2,6 +2,7 @@
 pub mod audio_capture;
 pub mod common;
 pub mod transcriber;
+pub mod voice_display;
 
 // New architecture modules
 pub mod settings;
@@ -21,7 +22,6 @@ pub mod whisper_provider;
 
 // Re-exports
 pub use audio_capture::AudioCapture;
-pub use simple_handler::SimpleVoiceHandler;
 pub use voice_handler::VoiceHandler; // Legacy
 pub use transcription_provider::TranscriptionBackend;
 pub use error::VoiceError;

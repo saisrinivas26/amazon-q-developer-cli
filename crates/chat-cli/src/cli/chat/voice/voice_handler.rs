@@ -9,6 +9,9 @@ use std::time::{
 
 use aws_config::SdkConfig;
 use eyre::Result;
+use rustyline::Editor;
+use rustyline::error::ReadlineError;
+use rustyline::history::FileHistory;
 
 use tokio::sync::mpsc;
 use tokio::time::timeout;
@@ -28,6 +31,7 @@ use super::transcription_provider::{TranscriptionProvider, TranscriptionBackend}
 use super::aws_transcribe_provider::AwsTranscribeProvider;
 use super::parakeet_provider::ParakeetProvider;
 use super::whisper_provider::WhisperProvider;
+use super::voice_display::VoiceDisplay;
 
 #[derive(Debug)]
 enum InputEvent {
@@ -76,10 +80,13 @@ impl VoiceHandler {
             return self.listen_for_speech().await;
         }
 
-        println!("🔄 Starting streaming transcription...");
-        println!("   (Speak continuously, press Ctrl+C to cancel)");
+        println!("🔄 Starting enhanced streaming transcription...");
         
-        // Use existing transcription infrastructure with streaming display
+        // Initialize enhanced display
+        let mut display = VoiceDisplay::new();
+        display.start_display()?;
+        
+        // Use existing transcription infrastructure with enhanced display
         let transcription_result = self.provider.start_transcription().await?;
         let (audio_tx, mut audio_rx) = mpsc::channel::<Vec<u8>>(1000);
         let _stream = self.audio_capture.start_capture(audio_tx)?;
@@ -95,29 +102,35 @@ impl VoiceHandler {
         let mut final_transcript = String::new();
         let mut last_update = Instant::now();
         let recording_start = Instant::now();
-
-        println!("🔴 Streaming... speak now");
+        let mut voice_activity_counter = 0u32;
         
-        // Streaming display loop with enhanced feedback
+        // Enhanced streaming display loop
         loop {
             match timeout(Duration::from_millis(100), transcript_receiver.recv()).await {
                 Ok(Some(transcript_event)) => {
                     let transcript_text = &transcript_event.transcript;
-                    if !transcript_text.trim().is_empty() && transcript_text != &final_transcript {
-                        // Update display every 200ms max with streaming indicator
-                        if last_update.elapsed() >= Duration::from_millis(200) {
-                            print!("\r💬 {} ...", transcript_text);
-                            io::stdout().flush().ok();
+                    if !transcript_text.trim().is_empty() {
+                        // Simulate voice activity and confidence
+                        let voice_active = !transcript_text.trim().is_empty();
+                        let confidence = 0.85 + (voice_activity_counter % 10) as f32 * 0.01;
+                        
+                        // Update display every 100ms for smooth animation
+                        if last_update.elapsed() >= Duration::from_millis(100) {
+                            display.update_streaming(transcript_text, Some(confidence), voice_active)?;
                             last_update = Instant::now();
+                            voice_activity_counter += 1;
                         }
                         final_transcript = transcript_text.clone();
                     }
                 },
                 Ok(None) => break, // Channel closed
                 Err(_) => {
-                    // Timeout - check if we should stop
+                    // Timeout - update display with current state
+                    let voice_active = false;
+                    display.update_streaming(&final_transcript, Some(0.0), voice_active)?;
+                    
+                    // Check if we should stop
                     if recording_start.elapsed() > Duration::from_secs(30) {
-                        println!("\n⏰ Recording timeout reached");
                         break;
                     }
                 }
@@ -125,9 +138,57 @@ impl VoiceHandler {
         }
 
         audio_forward_handle.abort();
-        println!("\n✅ Streaming complete");
         
-        Ok(Some(final_transcript))
+        // Finalize display and show options
+        display.finalize(&final_transcript)?;
+        
+        // Handle user input for edit options
+        let final_result = self.handle_transcript_options(&final_transcript).await?;
+        
+        display.cleanup()?;
+        
+        Ok(final_result)
+    }
+
+    async fn handle_transcript_options(&self, transcript: &str) -> Result<Option<String>> {
+        loop {
+            // Use rustyline for consistent input handling
+            let choice = tokio::task::spawn_blocking(|| {
+                let mut rl = Editor::<(), FileHistory>::new().ok()?;
+                match rl.readline("") {
+                    Ok(choice) => Some(choice.trim().to_lowercase()),
+                    Err(ReadlineError::Interrupted | ReadlineError::Eof) => None,
+                    Err(_) => None,
+                }
+            }).await.unwrap_or_default();
+
+            match choice.as_deref() {
+                Some("") => {
+                    // Submit as-is (just Enter)
+                    println!("✅ Submitting transcript as-is");
+                    return Ok(Some(transcript.to_string()));
+                },
+                Some("e") => {
+                    // Edit mode - open external editor
+                    println!("✏️  Opening external editor...");
+                    return self.launch_interactive_editor(transcript.to_string()).await;
+                },
+                Some("r") => {
+                    // Re-record
+                    println!("🔄 Re-recording...");
+                    return Box::pin(self.listen_for_speech_streaming()).await;
+                },
+                None => {
+                    // Ctrl+C or error
+                    println!("❌ Cancelled");
+                    return Ok(None);
+                },
+                _ => {
+                    println!("Invalid option. Press Enter, e, or r");
+                    continue;
+                }
+            }
+        }
     }
 
     pub async fn listen_for_speech(&self) -> Result<Option<String>> {
@@ -394,43 +455,14 @@ impl VoiceHandler {
         println!();
         println!("🎯 Options:");
         println!("   • Press [Enter] to submit as-is");
-        println!("   • Press [e] + [Enter] to edit in external editor ($EDITOR)");
+        println!("   • Press [e] + [Enter] to edit");
+        println!("   • Press [r] + [Enter] to re-record");
         println!("   • Press [Ctrl+C] to cancel");
-        println!();
+        print!("\n> ");
         io::stdout().flush().ok();
 
-        // Direct input handling to avoid double-enter issue
-        use std::io::{stdin, BufRead};
-        
-        // Make sure to flush the prompt and clear any buffered input
-        print!("> ");
-        io::stdout().flush()?;
-        
-        // Read input directly in a blocking manner
-        let choice = tokio::task::spawn_blocking(|| {
-            let stdin = stdin();
-            let mut line = String::new();
-            match stdin.lock().read_line(&mut line) {
-                Ok(_) => line.trim().to_lowercase(),
-                Err(_) => String::new(),
-            }
-        }).await.unwrap_or_default();
-
-        // Extra line break after input
-        println!();
-
-        if choice.is_empty() {
-            // User pressed Enter without input - use original transcript
-            println!("📤 Submitting original transcription...");
-            Ok(Some(transcript))
-        } else if choice == "e" || choice == "edit" || choice == "editor" {
-            // User wants to edit in external editor
-            self.launch_interactive_editor(transcript).await
-        } else {
-            // User typed something else - treat as replacement text
-            println!("📤 Submitting your input as replacement...");
-            Ok(Some(choice))
-        }
+        // Handle user input for edit options
+        self.handle_transcript_options(&transcript).await
     }
 
     async fn launch_interactive_editor(&self, transcript: String) -> Result<Option<String>> {

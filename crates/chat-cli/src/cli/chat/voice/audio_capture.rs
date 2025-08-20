@@ -9,7 +9,7 @@ use cpal::{
     StreamConfig,
 };
 use eyre::Result;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{
     debug,

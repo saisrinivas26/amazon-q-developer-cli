@@ -119,6 +119,10 @@ tracing-subscriber.workspace = true
 typed-path.workspace = true
 unicode-width.workspace = true
 url.workspace = true
+
+# Native voice transcription
+whisper-rs = "0.12"
+hound = "3.5"
 uuid.workspace = true
 walkdir.workspace = true
 webpki-roots.workspace = true
