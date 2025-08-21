@@ -33,7 +33,7 @@ impl VoiceDisplay {
             cursor::Hide
         )?;
 
-        // Draw initial box
+        // Draw initial box at the top
         self.draw_voice_box()?;
         Ok(())
     }
@@ -69,8 +69,8 @@ impl VoiceDisplay {
     }
 
     fn draw_voice_box(&self) -> io::Result<()> {
-        // Move to top and clear display area
-        execute!(io::stdout(), cursor::MoveTo(0, 5))?;
+        // Move to top and clear display area  
+        execute!(io::stdout(), cursor::MoveTo(0, 0))?;
 
         let elapsed = self.start_time.elapsed().as_secs_f32();
         let avg_confidence = if self.confidence_history.is_empty() {
@@ -79,45 +79,53 @@ impl VoiceDisplay {
             self.confidence_history.iter().sum::<f32>() / self.confidence_history.len() as f32
         };
 
-        // Draw box border
+        // Draw box border (77 characters wide interior)
         println!("┌─────────────────────────────────────────────────────────────────────────────┐");
         
-        // Timer and confidence line
-        println!("│ ⏱️  Recording: {:.1}s | Confidence: {:.0}% | Status: {}           │", 
-            elapsed, 
-            avg_confidence * 100.0,
-            if self.is_final { "Complete" } else { "Listening" }
-        );
+        // Timer and confidence line - account for emoji width
+        let status = if self.is_final { "Complete" } else { "Listening" };
+        let timer_text = format!("Recording: {:.1}s | Confidence: {:.0}% | Status: {}", 
+            elapsed, avg_confidence * 100.0, status);
+        // Emoji ⏱️ takes 2 display positions but counts as more chars, so pad to 73
+        println!("│ ⏱️  {:<73} │", timer_text);
         
-        // Voice activity bar
-        print!("│ 🎙️  [");
+        // Voice activity bar - account for emoji width  
+        let mut activity_display = String::new();
+        activity_display.push('[');
         for &active in &self.voice_activity {
             if active {
-                print!("█");
+                activity_display.push('█');
             } else {
-                print!("░");
+                activity_display.push('░');
             }
         }
-        // Fill remaining space
+        // Fill remaining space to exactly 40 chars
         for _ in self.voice_activity.len()..40 {
-            print!("░");
+            activity_display.push('░');
         }
-        println!("]                                    │");
+        activity_display.push(']');
+        // Emoji 🎙️ takes 2 display positions, so pad to 71
+        println!("│ 🎙️  {:<71} │", activity_display);
         
-        // Transcript line with proper padding
-        let transcript_display = if self.current_transcript.len() > 70 {
-            format!("{}...", &self.current_transcript[..67])
+        // Transcript line - account for emoji width
+        let transcript_display = if self.current_transcript.len() > 65 {
+            format!("{}...", &self.current_transcript[..62])
         } else {
             self.current_transcript.clone()
         };
+        // Emoji 💬 takes 2 display positions, so pad to 73  
+        println!("│ 💬  {:<73} │", transcript_display);
         
-        println!("│ 💬  {:<70} │", transcript_display);
+        // Empty line
+        println!("│{:<77}│", "");
         
+        // Options line (only when final) - fix the text and alignment
         if self.is_final {
-            println!("│                                                                             │");
-            println!("│ Options: [Enter] Submit as-is  [E] Edit  [R] Re-record  [C] Cancel        │");
+            let options_text = "Options: [Enter] Submit as-is  [E] Edit  [Ctrl+C] Cancel";
+            println!("│ {:<75} │", options_text);
         }
         
+        // Bottom border
         println!("└─────────────────────────────────────────────────────────────────────────────┘");
         
         io::stdout().flush()?;
@@ -131,11 +139,6 @@ impl VoiceDisplay {
             cursor::MoveTo(0, 12)
         )?;
         
-        println!("\n🎯 Options:");
-        println!("   • Press [Enter] to submit as-is");
-        println!("   • Press [e] + [Enter] to edit");
-        println!("   • Press [r] + [Enter] to re-record");
-        println!("   • Press [Ctrl+C] to cancel");
         print!("\n> ");
         io::stdout().flush()?;
         Ok(())

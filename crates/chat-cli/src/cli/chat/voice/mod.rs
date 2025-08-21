@@ -1,28 +1,21 @@
 // Core modules
 pub mod audio_capture;
 pub mod common;
-pub mod transcriber;
 pub mod voice_display;
 
-// New architecture modules
-pub mod settings;
+// Architecture modules
 pub mod error;
 pub mod streaming;
-pub mod model_manager;
 pub mod provider;
-pub mod simple_handler;
 pub mod providers;
 
-// Legacy modules (for compatibility)
+// Main handler
 pub mod voice_handler;
 pub mod transcription_provider;
-pub mod aws_transcribe_provider;
-pub mod parakeet_provider;
-pub mod whisper_provider;
 
 // Re-exports
 pub use audio_capture::AudioCapture;
-pub use voice_handler::VoiceHandler; // Legacy
+pub use voice_handler::VoiceHandler;
 pub use transcription_provider::TranscriptionBackend;
 pub use error::VoiceError;
 

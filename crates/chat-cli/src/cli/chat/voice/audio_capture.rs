@@ -1,3 +1,4 @@
+
 use cpal::traits::{
     DeviceTrait,
     HostTrait,
@@ -9,7 +10,6 @@ use cpal::{
     StreamConfig,
 };
 use eyre::Result;
-use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{
     debug,
@@ -262,18 +262,6 @@ impl AudioCapture {
         Ok(())
     }
 
-    // Streaming methods for real-time audio processing
-    pub async fn get_latest_chunk(&self) -> Result<Option<Vec<u8>>> {
-        // For now, return None - this will be implemented with a proper audio buffer
-        // In a real implementation, this would return 200ms chunks from a ring buffer
-        Ok(None)
-    }
-
-    pub async fn is_silent_for(&self, _duration: Duration) -> Result<bool> {
-        // Simple implementation - for now always return false
-        // In a real implementation, this would track voice activity
-        Ok(false)
-    }
 }
 
 #[cfg(target_os = "macos")]

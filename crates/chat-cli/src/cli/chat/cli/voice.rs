@@ -122,14 +122,24 @@ impl VoiceArgs {
                     });
                 }
 
-                // Choose streaming or batch based on flag and support
-                let transcription_result = if self.streaming && voice_handler.supports_streaming() {
-                    execute!(
-                        session.stderr,
-                        style::SetForegroundColor(Color::Cyan),
-                        style::Print("🔄 Streaming mode enabled - real-time transcription\n"),
-                        style::SetForegroundColor(Color::Reset)
-                    )?;
+                // Choose streaming or batch based on backend and flag
+                let use_streaming = self.streaming || matches!(self.backend, TranscriptionBackendArg::AwsTranscribe);
+                let transcription_result = if use_streaming && voice_handler.supports_streaming() {
+                    if matches!(self.backend, TranscriptionBackendArg::AwsTranscribe) {
+                        execute!(
+                            session.stderr,
+                            style::SetForegroundColor(Color::Cyan),
+                            style::Print("🔄 AWS Transcribe streaming mode - real-time transcription\n"),
+                            style::SetForegroundColor(Color::Reset)
+                        )?;
+                    } else {
+                        execute!(
+                            session.stderr,
+                            style::SetForegroundColor(Color::Cyan),
+                            style::Print("🔄 Streaming mode enabled - real-time transcription\n"),
+                            style::SetForegroundColor(Color::Reset)
+                        )?;
+                    }
                     
                     voice_handler.listen_for_speech_streaming().await
                 } else {

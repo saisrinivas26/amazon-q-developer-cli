@@ -1329,6 +1329,7 @@ dependencies = [
  "glob",
  "globset",
  "hex",
+ "hound",
  "http 1.3.1",
  "http-body-util",
  "hyper 1.7.0",
@@ -1400,6 +1401,7 @@ dependencies = [
  "walkdir",
  "webpki-roots 0.26.8",
  "which 6.0.3",
+ "whisper-rs",
  "whoami",
  "windows 0.61.3",
  "winnow 0.6.2",
@@ -3055,6 +3057,12 @@ checksum = "589533453244b0995c858700322199b2becb13b627df2851f64a2775d024abcf"
 dependencies = [
  "windows-sys 0.59.0",
 ]
+
+[[package]]
+name = "hound"
+version = "3.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62adaabb884c94955b19907d60019f4e145d091c75345379e70d1ee696f7854f"
 
 [[package]]
 name = "http"
@@ -7410,6 +7418,27 @@ name = "whichlang"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b9aa3ad29c3d08283ac6b769e3ec15ad1ddb88af7d2e9bc402c574973b937e7"
+
+[[package]]
+name = "whisper-rs"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c597ac8a9d5c4719fee232abc871da184ea50a4fea38d2d00348fd95072b2b0"
+dependencies = [
+ "whisper-rs-sys",
+]
+
+[[package]]
+name = "whisper-rs-sys"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d22f00ed0995463eecc34ef89905845f6bf6fd37ea70789fed180520050da8f8"
+dependencies = [
+ "bindgen 0.69.5",
+ "cfg-if",
+ "cmake",
+ "fs_extra",
+]
 
 [[package]]
 name = "whoami"

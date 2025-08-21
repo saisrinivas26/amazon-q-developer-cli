@@ -42,13 +42,6 @@ impl StreamingTranscription {
         }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.partial_text.trim().is_empty()
-    }
-
-    pub fn has_content(&self) -> bool {
-        self.word_count > 0
-    }
 }
 
 pub type TranscriptionStream = mpsc::Receiver<StreamingTranscription>;
@@ -56,31 +49,10 @@ pub type TranscriptionStream = mpsc::Receiver<StreamingTranscription>;
 #[derive(Debug, Clone)]
 pub struct AudioBlob {
     pub data: Vec<u8>,
-    pub sample_rate: u32,
-    pub channels: u16,
-    pub format: AudioFormat,
-}
-
-#[derive(Debug, Clone)]
-pub enum AudioFormat {
-    Wav,
-    Raw,
-    Flac,
 }
 
 impl AudioBlob {
-    pub fn new(data: Vec<u8>, sample_rate: u32, channels: u16) -> Self {
-        Self {
-            data,
-            sample_rate,
-            channels,
-            format: AudioFormat::Raw,
-        }
-    }
-
-    pub fn size_mb(&self) -> f64 {
-        self.data.len() as f64 / (1024.0 * 1024.0)
-    }
+    // Simple constructor - data only
 }
 
 pub type AudioStream = mpsc::Receiver<AudioBlob>;
