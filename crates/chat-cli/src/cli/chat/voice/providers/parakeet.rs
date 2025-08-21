@@ -69,7 +69,7 @@ impl ParakeetProvider {
 
     async fn check_dependencies(&self) -> VoiceResult<()> {
         // Check required packages for NVIDIA NeMo Parakeet
-        let packages = ["torch", "nemo_toolkit", "librosa", "soundfile"];
+        let packages = ["torch", "nemo", "librosa", "soundfile"];
         
         for package in packages {
             let output = Command::new(&self.python_executable)
