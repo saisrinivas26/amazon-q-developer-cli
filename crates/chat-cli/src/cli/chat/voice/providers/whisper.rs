@@ -242,7 +242,8 @@ else:
 
     async fn create_wav_file(&self, audio_data: &[u8], sample_rate: u32) -> VoiceResult<String> {
         let temp_dir = std::env::temp_dir();
-        let wav_path = temp_dir.join(format!("whisper_{}.wav", std::process::id()));
+        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+        let wav_path = temp_dir.join(format!("whisper_{}_{}.wav", std::process::id(), ts));
 
         // Create WAV file with proper header
         let mut wav_data = Vec::new();

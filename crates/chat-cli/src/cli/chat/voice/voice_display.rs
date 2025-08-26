@@ -40,13 +40,18 @@ impl VoiceDisplay {
 
     pub fn update_streaming(&mut self, text: &str, confidence: Option<f32>, voice_active: bool) -> io::Result<()> {
         self.current_transcript = text.to_string();
-        self.voice_activity.push(voice_active);
-        
-        if let Some(conf) = confidence {
-            self.confidence_history.push(conf);
+
+        // Only append activity when voice is detected (prevents wiping the bar with idle falses)
+        if voice_active {
+            self.voice_activity.push(true);
         }
 
-        // Keep only last 40 samples for activity bar
+        if let Some(conf) = confidence {
+            // keep values in [0.0, 1.0]
+            self.confidence_history.push(conf.clamp(0.0, 1.0));
+        }
+
+        // Keep only last 40 activity samples and last 10 confidence samples
         if self.voice_activity.len() > 40 {
             self.voice_activity.remove(0);
         }
@@ -73,25 +78,28 @@ impl VoiceDisplay {
         execute!(io::stdout(), cursor::MoveTo(0, 0))?;
 
         let elapsed = self.start_time.elapsed().as_secs_f32();
-        let avg_confidence = if self.confidence_history.is_empty() {
-            0.0
+        let avg_confidence_opt = if self.confidence_history.is_empty() {
+            None
         } else {
-            self.confidence_history.iter().sum::<f32>() / self.confidence_history.len() as f32
+            Some(self.confidence_history.iter().sum::<f32>() / self.confidence_history.len() as f32)
         };
 
         // Draw box border (77 characters wide interior)
         println!("┌─────────────────────────────────────────────────────────────────────────────┐");
         
-        // Timer and confidence line - account for emoji width
+        // Timer and confidence line - properly pad to 77 chars
         let status = if self.is_final { "Complete" } else { "Listening" };
-        let timer_text = format!("Recording: {:.1}s | Confidence: {:.0}% | Status: {}", 
-            elapsed, avg_confidence * 100.0, status);
-        // Emoji ⏱️ takes 2 display positions but counts as more chars, so pad to 73
-        println!("│ ⏱️  {:<73} │", timer_text);
+        let timer_text = match avg_confidence_opt {
+            Some(avg) => format!("⏱️  Recording: {:.1}s | Confidence: {:.0}% | Status: {}", 
+                elapsed, avg * 100.0, status),
+            None => format!("⏱️  Recording: {:.1}s | Confidence: — | Status: {}", 
+                elapsed, status),
+        };
+        let padding = 77_usize.saturating_sub(timer_text.chars().count());
+        println!("│ {}{} │", timer_text, " ".repeat(padding));
         
-        // Voice activity bar - account for emoji width  
-        let mut activity_display = String::new();
-        activity_display.push('[');
+        // Voice activity bar - properly pad to 77 chars
+        let mut activity_display = String::from("🎙️  [");
         for &active in &self.voice_activity {
             if active {
                 activity_display.push('█');
@@ -104,25 +112,30 @@ impl VoiceDisplay {
             activity_display.push('░');
         }
         activity_display.push(']');
-        // Emoji 🎙️ takes 2 display positions, so pad to 71
-        println!("│ 🎙️  {:<71} │", activity_display);
+        let padding = 77_usize.saturating_sub(activity_display.chars().count());
+        println!("│ {}{} │", activity_display, " ".repeat(padding));
         
-        // Transcript line - account for emoji width
-        let transcript_display = if self.current_transcript.len() > 65 {
-            format!("{}...", &self.current_transcript[..62])
+        // Transcript line - properly pad to 77 chars
+        let transcript_prefix = "💬  ";
+        let available_width = 77_usize.saturating_sub(transcript_prefix.chars().count());
+        let transcript_display = if self.current_transcript.chars().count() > available_width {
+            let truncated: String = self.current_transcript.chars().take(available_width.saturating_sub(3)).collect();
+            format!("{}...", truncated)
         } else {
             self.current_transcript.clone()
         };
-        // Emoji 💬 takes 2 display positions, so pad to 73  
-        println!("│ 💬  {:<73} │", transcript_display);
+        let full_line = format!("{}{}", transcript_prefix, transcript_display);
+        let padding = 77_usize.saturating_sub(full_line.chars().count());
+        println!("│ {}{} │", full_line, " ".repeat(padding));
         
         // Empty line
         println!("│{:<77}│", "");
         
-        // Options line (only when final) - fix the text and alignment
+        // Options line (only when final) - properly pad to 77 chars
         if self.is_final {
             let options_text = "Options: [Enter] Submit as-is  [E] Edit  [Ctrl+C] Cancel";
-            println!("│ {:<75} │", options_text);
+            let padding = 77_usize.saturating_sub(options_text.chars().count());
+            println!("│ {}{} │", options_text, " ".repeat(padding));
         }
         
         // Bottom border

@@ -150,7 +150,7 @@ impl VoiceHandler {
                             
                             // Update display with complete accumulated transcript
                             let voice_active = true;
-                            let confidence = 0.85 + (voice_activity_counter % 10) as f32 * 0.01;
+                            let confidence = transcript_event.confidence;
                             
                             if last_update.elapsed() >= Duration::from_millis(100) {
                                 display.update_streaming(&current_transcript, Some(confidence), voice_active)?;
@@ -166,7 +166,7 @@ impl VoiceHandler {
                             };
                             
                             let voice_active = true;
-                            let confidence = 0.85 + (voice_activity_counter % 10) as f32 * 0.01;
+                            let confidence = transcript_event.confidence;
                             
                             if last_update.elapsed() >= Duration::from_millis(100) {
                                 display.update_streaming(&display_text, Some(confidence), voice_active)?;
@@ -183,8 +183,8 @@ impl VoiceHandler {
                 },
                 Err(_) => {
                     // Timeout - update display and check for silence timeout
-                    let voice_active = false;
-                    display.update_streaming(&current_transcript, Some(0.0), voice_active)?;
+                    // Do not mutate confidence/activity on idle ticks
+                    display.update_streaming(&current_transcript, None, /*voice_active=*/false)?;
                     
                     // Check silence timeout conditions
                     let speech_silence = last_speech_time.elapsed();
@@ -250,55 +250,60 @@ impl VoiceHandler {
     }
 
     async fn handle_transcript_options(&self, transcript: &str) -> Result<Option<String>> {
+        use std::io::{stdin, stdout, Write};
+        
         loop {
-            // Use simple, reliable stdin reading with better error handling
-            let choice = tokio::task::spawn_blocking(|| -> Result<String, String> {
-                use std::io::{stdin, BufRead, BufReader};
-                
-                let stdin = stdin();
-                let mut reader = BufReader::new(stdin);
-                let mut line = String::new();
-                
-                match reader.read_line(&mut line) {
-                    Ok(0) => Err("EOF".to_string()), // Ctrl+C or EOF
-                    Ok(_) => {
-                        let trimmed = line.trim().to_lowercase();
-                        Ok(trimmed)
-                    },
-                    Err(e) => Err(format!("Read error: {}", e)),
-                }
-            }).await.unwrap_or_else(|_| Err("Task error".to_string()));
-
-            match choice {
-                Ok(ref input) => {
+            // Try a more direct approach to stdin reading that's less susceptible to buffering issues
+            print!("> ");
+            stdout().flush().ok();
+            
+            let mut input = String::new();
+            
+            // Use std::io::stdin directly in a blocking way without tokio::spawn_blocking
+            // This should be more reliable for Ctrl+C handling
+            match stdin().read_line(&mut input) {
+                Ok(0) => {
+                    // EOF (Ctrl+C/Ctrl+D)
+                    println!("❌ Cancelled");
+                    return Ok(None);
+                },
+                Ok(_) => {
+                    let input = input.trim().to_lowercase();
                     debug!("Received input: '{}'", input);
+                    
                     match input.as_str() {
                         "" => {
-                            // Submit as-is (just Enter) - exit the loop immediately
+                            // Submit as-is (just Enter)
                             return Ok(Some(transcript.to_string()));
                         },
                         "e" => {
-                            // Edit mode - open external editor
+                            // Edit mode
                             println!("✏️  Opening external editor...");
                             return self.launch_interactive_editor(transcript.to_string()).await;
                         },
+                        // Allow slash-commands to escape to REPL
+                        s if s.starts_with('/') => {
+                            println!("↪️  Exiting voice editor...");
+                            return Ok(Some(input.to_string()));
+                        },
+                        // Quick cancels
+                        "c" | "q" | "quit" | "cancel" => {
+                            println!("❌ Cancelled");
+                            return Ok(None);
+                        },
                         _ => {
-                            // Invalid input - show error and continue loop
+                            // Invalid input
                             println!("❌ Invalid option '{}'. Please press Enter, e, or Ctrl+C", input);
                             println!("🎯 Options:");
                             println!("   • Press [Enter] to submit as-is");
                             println!("   • Press [e] + [Enter] to edit");
                             println!("   • Press [Ctrl+C] to cancel");
-                            print!("\n> ");
-                            io::stdout().flush().ok();
-                            // Continue the loop for retry
                             continue;
                         }
                     }
                 },
-                Err(err) => {
-                    debug!("Input error: {}", err);
-                    // Ctrl+C, EOF, or error - exit the loop
+                Err(_) => {
+                    // Read error (likely Ctrl+C)
                     println!("❌ Cancelled");
                     return Ok(None);
                 }
@@ -501,28 +506,30 @@ impl VoiceHandler {
     }
 
     async fn process_batch_audio(&self, audio_data: &[u8]) -> Result<String> {
-        // Use the existing streaming interface for all providers
         let (blob_tx, blob_rx) = mpsc::channel(1);
-        
-        // Send the audio as a single blob for batch processing
-        let audio_blob = super::streaming::AudioBlob {
-            data: audio_data.to_vec(),
-        };
-        
-        let _ = blob_tx.send(audio_blob).await;
-        drop(blob_tx); // Close the channel to signal end of audio
-        
-        // Get transcription result using the standard interface
+        let _ = blob_tx.send(super::streaming::AudioBlob { data: audio_data.to_vec() }).await;
+        drop(blob_tx);
+
         let options = super::provider::TranscriptionOptions::default();
-        let mut transcript_receiver = self.provider.stream_transcribe(blob_rx, &options).await
+        let mut rx = self.provider.stream_transcribe(blob_rx, &options).await
             .map_err(|e| eyre::eyre!("Stream transcribe failed: {}", e))?;
-        
-        // Wait for the final result
-        match timeout(Duration::from_secs(30), transcript_receiver.recv()).await {
-            Ok(Some(result)) => Ok(result.partial_text),
-            Ok(None) => Ok(String::new()),
-            Err(_) => Err(eyre::eyre!("Transcription timed out")),
+
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut last_text = String::new();
+
+        while Instant::now() < deadline {
+            match timeout(Duration::from_secs(5), rx.recv()).await {
+                Ok(Some(evt)) => {
+                    if !evt.partial_text.trim().is_empty() {
+                        last_text = evt.partial_text.clone();
+                    }
+                    if evt.is_final { break; }
+                }
+                Ok(None) => break, // channel closed
+                Err(_) => break,   // idle timeout
+            }
         }
+        Ok(last_text)
     }
 
     fn update_single_line(transcript: &str, elapsed: f32, activity_level: u8) {
