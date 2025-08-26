@@ -227,9 +227,12 @@ else:
             .sum::<f64>() / samples.len() as f64)
             .sqrt();
 
-        // Convert to dB (avoiding log(0))
-        let db = if rms > 0.0 {
-            20.0 * rms.log10()
+        // Normalize RMS to 0-1 range for i16 samples (max value is 32767)
+        let normalized = rms / 32767.0_f64;
+
+        // Convert normalized RMS to dB (avoiding log(0))
+        let db = if normalized > 0.0 {
+            20.0 * normalized.log10()
         } else {
             -100.0 // Very quiet
         };
