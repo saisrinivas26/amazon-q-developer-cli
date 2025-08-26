@@ -5,10 +5,17 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::io::Write;
 use tokio::sync::mpsc;
-use tokio::process::{Command, Child};
+use tokio::process::{Command, Child, ChildStdin, ChildStdout};
 use tokio::time::{timeout, Duration};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use std::sync::Arc;
 use tokio::sync::Mutex;
+
+struct PyWorker {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+}
 
 use crate::cli::chat::voice::{
     error::{VoiceResult, VoiceError},
@@ -21,7 +28,7 @@ pub struct ParakeetProvider {
     python_executable: PathBuf,
     vad_threshold_db: f64,
     model_path: Option<String>,
-    python_worker: Arc<Mutex<Option<Child>>>,
+    python_worker: Arc<Mutex<Option<PyWorker>>>,
 }
 
 impl ParakeetProvider {
@@ -391,14 +398,7 @@ print("MODEL_CACHED" if model_found else "MODEL_NOT_CACHED")
 
         let has_voice = db > threshold_db;
         
-        // Debug logging every 100 chunks to avoid spam
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        static DEBUG_COUNTER: AtomicUsize = AtomicUsize::new(0);
-        let count = DEBUG_COUNTER.fetch_add(1, Ordering::Relaxed);
-        if count % 100 == 0 {
-            println!("🔊 VAD Debug: RMS={:.2}, dB={:.1}, threshold={:.1}, detected={}", 
-                rms, db, threshold_db, has_voice);
-        }
+        // VAD detection without debug spam
 
         has_voice
     }
@@ -637,7 +637,7 @@ impl TranscriptionProvider for ParakeetProvider {
             python_executable: python_executable.clone(),
             vad_threshold_db,
             model_path: self.model_path.clone(),
-            python_worker: Arc::new(Mutex::new(None)),
+            python_worker: self.python_worker.clone(), // ✅ reuse worker across the whole session
         };
 
         // Advanced streaming transcription with periodic processing from legacy
@@ -673,23 +673,11 @@ impl TranscriptionProvider for ParakeetProvider {
                                 // Always add to buffer for transcription
                                 audio_buffer.extend_from_slice(chunk_bytes);
                                 
-                                // Debug: Log audio chunk receipt
-                                use std::sync::atomic::{AtomicUsize, Ordering};
-                                static CHUNK_COUNTER: AtomicUsize = AtomicUsize::new(0);
-                                let count = CHUNK_COUNTER.fetch_add(1, Ordering::Relaxed);
-                                if count % 50 == 0 {
-                                    println!("🎤 Audio chunk #{}: size={} bytes, VAD={}, total_buffer={} bytes", 
-                                        count, chunk_bytes.len(), is_voice_activity, audio_buffer.len());
-                                }
-                                
-                                // TEMPORARY: For debugging, always consider we have recent audio
-                                // This bypasses VAD to test if the transcription works
+                                // Track voice activity for streaming
                                 has_recent_audio = true;
                                 last_voice_activity_time = std::time::Instant::now();
                                 
-                                // Also set if VAD detects voice activity
                                 if is_voice_activity {
-                                    println!("🔊 VAD detected voice activity!");
                                     has_recent_audio = true;
                                     last_voice_activity_time = std::time::Instant::now();
                                 }
@@ -704,7 +692,7 @@ impl TranscriptionProvider for ParakeetProvider {
                         if has_recent_audio && last_activity_event.elapsed() >= activity_event_interval {
                             let result = tx.send(StreamingTranscription::partial(
                                 final_transcript.clone(),
-                                0.8,
+                                f32::NAN, // No confidence data available from Parakeet
                                 session_start_time.elapsed(),
                             )).await;
                             if result.is_err() {
@@ -754,8 +742,7 @@ impl TranscriptionProvider for ParakeetProvider {
                                                             final_transcript.push_str(&cleaned_text);
                                                         }
                                                         
-                                                        println!("📝 NVIDIA PARAKEET TRANSCRIPTION: {}", final_transcript);
-                                                        let _ = tx.send(StreamingTranscription::new(
+                                                                                        let _ = tx.send(StreamingTranscription::new(
                                                             final_transcript.clone(),
                                                             false, // partial result
                                                         )).await;
@@ -803,36 +790,25 @@ impl TranscriptionProvider for ParakeetProvider {
             }
 
             // Send final result when recording stops
-            println!("🔄 RUST DEBUG: Final processing - transcript_len={}, buffer_len={}", 
-                final_transcript.len(), audio_buffer.len());
-                
             if !final_transcript.is_empty() {
-                println!("🔄 RUST DEBUG: Using existing transcript: '{}'", final_transcript);
                 let _ = tx.send(StreamingTranscription::final_result(
                     final_transcript,
-                    0.95,
+                    f32::NAN, // No confidence data available from Parakeet
                     session_start_time.elapsed(),
                 )).await;
             } else if !audio_buffer.is_empty() {
-                println!("🔄 RUST DEBUG: Processing {} bytes of audio for final transcription", audio_buffer.len());
-                
                 // Process remaining audio one final time
                 match provider_self.create_wav_file(&audio_buffer, 16000).await {
                     Ok(wav_path) => {
-                        println!("🔄 RUST DEBUG: Created WAV file: {}", wav_path);
-                        println!("🔄 RUST DEBUG: Calling transcribe_with_parakeet...");
-                        
                         match provider_self.transcribe_with_parakeet(&wav_path).await {
                             Ok(transcript) if !transcript.trim().is_empty() => {
-                                println!("🔄 RUST DEBUG: Transcription successful: '{}'", transcript);
                                 let _ = tx.send(StreamingTranscription::final_result(
                                     transcript.trim().to_string(),
-                                    0.95,
+                                    f32::NAN, // No confidence data available from Parakeet
                                     session_start_time.elapsed(),
                                 )).await;
                             }
-                            Ok(empty_result) => {
-                                println!("🔄 RUST DEBUG: Transcription returned empty: '{}'", empty_result);
+                            Ok(_) => {
                                 let _ = tx.send(StreamingTranscription::final_result(
                                     "No speech detected".to_string(),
                                     0.5,
@@ -840,7 +816,6 @@ impl TranscriptionProvider for ParakeetProvider {
                                 )).await;
                             }
                             Err(e) => {
-                                println!("🔄 RUST DEBUG: Transcription error: {}", e);
                                 eprintln!("NVIDIA Parakeet transcription error: {}", e);
                                 let _ = tx.send(StreamingTranscription::final_result(
                                     "Transcription failed".to_string(),
@@ -852,7 +827,6 @@ impl TranscriptionProvider for ParakeetProvider {
                         let _ = std::fs::remove_file(wav_path);
                     }
                     Err(e) => {
-                        println!("🔄 RUST DEBUG: WAV file creation failed: {}", e);
                         eprintln!("Failed to create WAV file: {}", e);
                         let _ = tx.send(StreamingTranscription::final_result(
                             "Audio processing failed".to_string(),
@@ -862,7 +836,6 @@ impl TranscriptionProvider for ParakeetProvider {
                     }
                 }
             } else {
-                println!("🔄 RUST DEBUG: No audio buffer to process");
                 let _ = tx.send(StreamingTranscription::final_result(
                     "No audio recorded".to_string(),
                     0.0,

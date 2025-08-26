@@ -329,9 +329,6 @@ impl VoiceHandler {
     }
 
     pub async fn listen_for_speech(&self) -> Result<Option<String>> {
-        println!("🎤 Voice mode activated. Speak now...");
-        println!("   (Press Ctrl+C to cancel or Enter to stop recording)");
-        println!();
 
         // Start audio capture
         let (audio_tx, mut audio_rx) = mpsc::channel::<Vec<u8>>(1000);

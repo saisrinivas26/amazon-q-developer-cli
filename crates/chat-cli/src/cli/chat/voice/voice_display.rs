@@ -8,7 +8,6 @@ use crossterm::{
 pub struct VoiceDisplay {
     start_time: Instant,
     voice_activity: Vec<bool>,
-    confidence_history: Vec<f32>,
     current_transcript: String,
     is_final: bool,
 }
@@ -18,7 +17,6 @@ impl VoiceDisplay {
         Self {
             start_time: Instant::now(),
             voice_activity: Vec::new(),
-            confidence_history: Vec::new(),
             current_transcript: String::new(),
             is_final: false,
         }
@@ -38,7 +36,7 @@ impl VoiceDisplay {
         Ok(())
     }
 
-    pub fn update_streaming(&mut self, text: &str, confidence: Option<f32>, voice_active: bool) -> io::Result<()> {
+    pub fn update_streaming(&mut self, text: &str, _confidence: Option<f32>, voice_active: bool) -> io::Result<()> {
         self.current_transcript = text.to_string();
 
         // Only append activity when voice is detected (prevents wiping the bar with idle falses)
@@ -46,17 +44,9 @@ impl VoiceDisplay {
             self.voice_activity.push(true);
         }
 
-        if let Some(conf) = confidence {
-            // keep values in [0.0, 1.0]
-            self.confidence_history.push(conf.clamp(0.0, 1.0));
-        }
-
-        // Keep only last 40 activity samples and last 10 confidence samples
+        // Keep only last 40 activity samples
         if self.voice_activity.len() > 40 {
             self.voice_activity.remove(0);
-        }
-        if self.confidence_history.len() > 10 {
-            self.confidence_history.remove(0);
         }
 
         self.draw_voice_box()?;
@@ -78,20 +68,10 @@ impl VoiceDisplay {
         execute!(io::stdout(), cursor::MoveTo(0, 0))?;
 
         let elapsed = self.start_time.elapsed().as_secs_f32();
-        let avg_confidence_opt = if self.confidence_history.is_empty() {
-            None
-        } else {
-            Some(self.confidence_history.iter().sum::<f32>() / self.confidence_history.len() as f32)
-        };
 
-        // Timer and confidence line
+        // Timer and status line (no confidence display)
         let status = if self.is_final { "Complete" } else { "Listening" };
-        let timer_text = match avg_confidence_opt {
-            Some(avg) => format!("⏱️  Recording: {:.1}s | Confidence: {:.0}% | Status: {}", 
-                elapsed, avg * 100.0, status),
-            None => format!("⏱️  Recording: {:.1}s | Confidence: — | Status: {}", 
-                elapsed, status),
-        };
+        let timer_text = format!("⏱️  Recording: {:.1}s | Status: {}", elapsed, status);
         println!("{}", timer_text);
         
         // Voice activity bar
