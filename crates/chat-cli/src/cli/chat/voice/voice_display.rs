@@ -84,10 +84,7 @@ impl VoiceDisplay {
             Some(self.confidence_history.iter().sum::<f32>() / self.confidence_history.len() as f32)
         };
 
-        // Draw box border (77 characters wide interior)
-        println!("┌─────────────────────────────────────────────────────────────────────────────┐");
-        
-        // Timer and confidence line - properly pad to 77 chars
+        // Timer and confidence line
         let status = if self.is_final { "Complete" } else { "Listening" };
         let timer_text = match avg_confidence_opt {
             Some(avg) => format!("⏱️  Recording: {:.1}s | Confidence: {:.0}% | Status: {}", 
@@ -95,10 +92,9 @@ impl VoiceDisplay {
             None => format!("⏱️  Recording: {:.1}s | Confidence: — | Status: {}", 
                 elapsed, status),
         };
-        let padding = 77_usize.saturating_sub(timer_text.chars().count());
-        println!("│ {}{} │", timer_text, " ".repeat(padding));
+        println!("{}", timer_text);
         
-        // Voice activity bar - properly pad to 77 chars
+        // Voice activity bar
         let mut activity_display = String::from("🎙️  [");
         for &active in &self.voice_activity {
             if active {
@@ -112,34 +108,23 @@ impl VoiceDisplay {
             activity_display.push('░');
         }
         activity_display.push(']');
-        let padding = 77_usize.saturating_sub(activity_display.chars().count());
-        println!("│ {}{} │", activity_display, " ".repeat(padding));
+        println!("{}", activity_display);
         
-        // Transcript line - properly pad to 77 chars
-        let transcript_prefix = "💬  ";
-        let available_width = 77_usize.saturating_sub(transcript_prefix.chars().count());
-        let transcript_display = if self.current_transcript.chars().count() > available_width {
-            let truncated: String = self.current_transcript.chars().take(available_width.saturating_sub(3)).collect();
-            format!("{}...", truncated)
+        // Transcript line
+        let transcript_display = if self.current_transcript.is_empty() {
+            "💬 ".to_string()
         } else {
-            self.current_transcript.clone()
+            format!("💬 {}", self.current_transcript)
         };
-        let full_line = format!("{}{}", transcript_prefix, transcript_display);
-        let padding = 77_usize.saturating_sub(full_line.chars().count());
-        println!("│ {}{} │", full_line, " ".repeat(padding));
+        println!("{}", transcript_display);
         
-        // Empty line
-        println!("│{:<77}│", "");
+        // Empty line for spacing
+        println!();
         
-        // Options line (only when final) - properly pad to 77 chars
+        // Options line (only when final)
         if self.is_final {
-            let options_text = "Options: [Enter] Submit as-is  [E] Edit  [Ctrl+C] Cancel";
-            let padding = 77_usize.saturating_sub(options_text.chars().count());
-            println!("│ {}{} │", options_text, " ".repeat(padding));
+            println!("Options: [Enter] Submit as-is  [E] Edit  [Ctrl+C] Cancel");
         }
-        
-        // Bottom border
-        println!("└─────────────────────────────────────────────────────────────────────────────┘");
         
         io::stdout().flush()?;
         Ok(())
@@ -147,6 +132,7 @@ impl VoiceDisplay {
 
     fn show_edit_options(&self) -> io::Result<()> {
         execute!(
+         
             io::stdout(),
             cursor::Show,
             cursor::MoveTo(0, 12)

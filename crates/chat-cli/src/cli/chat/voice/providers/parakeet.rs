@@ -461,6 +461,7 @@ os.environ['NEMO_LOG_LEVEL'] = 'ERROR'
 warnings.filterwarnings("ignore")
 
 # PyTorch / device setup
+os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 torch.set_float32_matmul_precision("high")
 torch.backends.cudnn.benchmark = False
 torch.set_num_threads(4)
@@ -478,10 +479,24 @@ except Exception as torch_error:
 
 @torch.inference_mode()
 def transcribe_audio_optimized(model, audio_path, device):
-    """Optimized transcription with inference mode and AMP on MPS only"""
-    amp_ctx = torch.autocast(device_type="mps", dtype=torch.float16) if device == "mps" else nullcontext()
-    with amp_ctx:
-        return model.transcribe([audio_path], timestamps=False)  # timestamps=False is faster
+    """
+    Inference in FP32 (MPS + NeMo can assert with FP16).
+    If MPS path fails for any reason, automatically retry on CPU.
+    """
+    try:
+        return model.transcribe([audio_path], timestamps=False)
+    except Exception as e:
+        import traceback, torch
+        print(f"DEBUG: MPS/primary path failed: {{e}}", file=sys.stderr)
+        traceback.print_exc()
+        try:
+            # Fallback to CPU FP32
+            model = model.to("cpu")
+            torch.set_default_dtype(torch.float32)
+            return model.transcribe([audio_path], timestamps=False)
+        except Exception as e2:
+            print(f"ERROR:Fallback to CPU failed: {{e2}}", file=sys.stderr)
+            raise
 
 try:
     import nemo.collections.asr as nemo_asr

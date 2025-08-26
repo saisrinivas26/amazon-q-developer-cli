@@ -253,14 +253,11 @@ impl VoiceHandler {
         use std::io::{stdin, stdout, Write};
         
         loop {
-            // Try a more direct approach to stdin reading that's less susceptible to buffering issues
             print!("> ");
             stdout().flush().ok();
             
             let mut input = String::new();
             
-            // Use std::io::stdin directly in a blocking way without tokio::spawn_blocking
-            // This should be more reliable for Ctrl+C handling
             match stdin().read_line(&mut input) {
                 Ok(0) => {
                     // EOF (Ctrl+C/Ctrl+D)
@@ -309,6 +306,26 @@ impl VoiceHandler {
                 }
             }
         }
+    }
+
+    async fn handle_transcript_options_with_cleanup(&self, transcript: &str) -> Result<Option<String>> {
+        use std::io::{stdin, stdout, Write};
+        
+        // For batch mode, first drain any buffered stdin from the recording phase
+        println!("Press any key to continue...");
+        tokio::task::spawn_blocking(|| {
+            use std::io::{stdin, BufRead, BufReader};
+            
+            let stdin = stdin();
+            let mut reader = BufReader::new(stdin);
+            let mut dummy = String::new();
+            
+            // Read and discard one line (this consumes the buffered Enter from recording)
+            let _ = reader.read_line(&mut dummy);
+        }).await.ok();
+        
+        // Now proceed with normal options handling
+        self.handle_transcript_options(transcript).await
     }
 
     pub async fn listen_for_speech(&self) -> Result<Option<String>> {
@@ -422,12 +439,14 @@ impl VoiceHandler {
                                         .sqrt()
                                 } else { 0.0 };
                                 
-                                // Update activity timers based on audio energy
+                                let norm = rms / 32767.0_f64;
+                                let db = if norm > 0.0 { 20.0 * norm.log10() } else { -100.0 };
+                                
                                 last_activity_time = Instant::now();
-                                if rms > 800.0 { // Voice threshold
+                                if db > -48.0 {
                                     last_voice_time = Instant::now();
                                     voice_activity_level = 8;
-                                } else if rms > 400.0 {
+                                } else if db > -60.0 {
                                     voice_activity_level = 4;
                                 } else {
                                     voice_activity_level = voice_activity_level.saturating_sub(1);
@@ -474,11 +493,11 @@ impl VoiceHandler {
         // Clean up input task properly
         input_handle.abort();
         
-        // Give a brief moment for task cleanup without aggressive stdin manipulation
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
         // Move to new line after recording
         println!();
+        
+        // Longer delay to let stdin settle and any buffered input to be processed
+        tokio::time::sleep(Duration::from_millis(300)).await;
 
         if audio_buffer.is_empty() {
             println!("🔇 No audio recorded");
@@ -596,8 +615,8 @@ impl VoiceHandler {
         print!("\n> ");
         io::stdout().flush().ok();
 
-        // Handle user input for edit options
-        self.handle_transcript_options(&transcript).await
+        // For batch mode, we need to drain buffered stdin from the recording phase
+        self.handle_transcript_options_with_cleanup(&transcript).await
     }
 
     async fn launch_interactive_editor(&self, transcript: String) -> Result<Option<String>> {
