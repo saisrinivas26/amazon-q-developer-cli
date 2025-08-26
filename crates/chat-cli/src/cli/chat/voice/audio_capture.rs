@@ -49,6 +49,31 @@ impl AudioCapture {
         Ok(Self { device, config })
     }
 
+    /// Resample mono f32 audio to exactly 16 kHz using linear interpolation
+    /// Handles both upsampling and downsampling correctly
+    fn resample_mono_to_16k(mono: &[f32], in_rate: u32) -> Vec<f32> {
+        if mono.is_empty() || in_rate == 16000 { 
+            return mono.to_vec(); 
+        }
+        
+        let in_len = mono.len();
+        // Target length proportional to rates (avoid zero)
+        let out_len = ((in_len as u64 * 16000) / in_rate as u64).max(1) as usize;
+        let scale = in_rate as f64 / 16000.0;
+
+        let mut out = Vec::with_capacity(out_len);
+        for i in 0..out_len {
+            let pos = i as f64 * scale;
+            let idx = pos.floor() as usize;
+            let frac = (pos - idx as f64) as f32;
+
+            let s0 = mono[idx.min(in_len - 1)];
+            let s1 = mono[(idx + 1).min(in_len - 1)];
+            out.push(s0 + (s1 - s0) * frac);
+        }
+        out
+    }
+
     pub fn start_capture(&self, audio_sender: mpsc::Sender<Vec<u8>>) -> Result<Stream> {
         let sender = audio_sender.clone();
         let config = self.config.clone();
@@ -88,32 +113,19 @@ impl AudioCapture {
             .build_input_stream(
                 config,
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                    // Convert to mono if needed and resample to 16kHz for AWS Transcribe
+                    // Convert to mono if needed
                     let mono_data: Vec<f32> = if channels == 1 {
                         data.to_vec()
                     } else {
-                        // Convert multi-channel to mono by averaging
-                        data.chunks(channels)
-                            .map(|frame| frame.iter().sum::<f32>() / channels as f32)
-                            .collect()
+                        data.chunks(channels).map(|f| f.iter().sum::<f32>() / channels as f32).collect()
                     };
 
-                    // Simple resampling to 16kHz if needed
-                    let resampled_data = if sample_rate == 16000 {
-                        mono_data
-                    } else {
-                        // Basic downsampling - take every nth sample
-                        let ratio = sample_rate as f32 / 16000.0;
-                        mono_data.iter().step_by(ratio as usize).cloned().collect()
-                    };
-
-                    // Convert to 16-bit PCM for AWS Transcribe
-                    let pcm_data: Vec<i16> = resampled_data
-                        .iter()
-                        .map(|&sample| {
-                            let clamped = sample.clamp(-1.0, 1.0);
-                            (clamped * i16::MAX as f32) as i16
-                        })
+                    // Resample to exactly 16kHz using linear interpolation
+                    let resampled = Self::resample_mono_to_16k(&mono_data, sample_rate);
+                    
+                    // Convert resampled f32 to i16 PCM
+                    let pcm_data: Vec<i16> = resampled.iter()
+                        .map(|&s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
                         .collect();
 
                     // Convert to bytes (little-endian)
@@ -150,29 +162,23 @@ impl AudioCapture {
                 config,
                 move |data: &[i16], _: &cpal::InputCallbackInfo| {
                     // Convert to mono if needed
-                    let mono_data: Vec<i16> = if channels == 1 {
+                    let mono_i16: Vec<i16> = if channels == 1 {
                         data.to_vec()
                     } else {
-                        // Convert multi-channel to mono by averaging
-                        data.chunks(channels)
-                            .map(|frame| {
-                                let sum: i32 = frame.iter().map(|&x| x as i32).sum();
-                                (sum / channels as i32) as i16
-                            })
-                            .collect()
+                        data.chunks(channels).map(|f| {
+                            (f.iter().map(|&x| x as i32).sum::<i32>() / channels as i32) as i16
+                        }).collect()
                     };
 
-                    // Simple resampling to 16kHz if needed
-                    let resampled_data = if sample_rate == 16000 {
-                        mono_data
-                    } else {
-                        // Basic downsampling - take every nth sample
-                        let ratio = sample_rate as f32 / 16000.0;
-                        mono_data.iter().step_by(ratio as usize).cloned().collect()
-                    };
+                    // Convert to f32, resample, then back to i16
+                    let mono_f32: Vec<f32> = mono_i16.iter().map(|&s| s as f32 / i16::MAX as f32).collect();
+                    let resampled = Self::resample_mono_to_16k(&mono_f32, sample_rate);
+                    let pcm_data: Vec<i16> = resampled.iter()
+                        .map(|&s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
+                        .collect();
 
                     // Convert to bytes (little-endian)
-                    let bytes: Vec<u8> = resampled_data.iter().flat_map(|&sample| sample.to_le_bytes()).collect();
+                    let bytes: Vec<u8> = pcm_data.iter().flat_map(|&sample| sample.to_le_bytes()).collect();
 
                     if let Err(e) = sender.try_send(bytes) {
                         match e {
@@ -205,30 +211,24 @@ impl AudioCapture {
                 config,
                 move |data: &[u16], _: &cpal::InputCallbackInfo| {
                     // Convert to mono if needed and convert u16 to i16
-                    let mono_data: Vec<i16> = if channels == 1 {
-                        data.iter().map(|&sample| (sample as i32 - 32768) as i16).collect()
+                    let mono_i16: Vec<i16> = if channels == 1 {
+                        data.iter().map(|&u| (u as i32 - 32768) as i16).collect()
                     } else {
-                        // Convert multi-channel to mono by averaging, then u16 to i16
-                        data.chunks(channels)
-                            .map(|frame| {
-                                let sum: i32 = frame.iter().map(|&x| x as i32).sum();
-                                let avg = sum / channels as i32;
-                                (avg - 32768) as i16
-                            })
-                            .collect()
+                        data.chunks(channels).map(|f| {
+                            let avg = f.iter().map(|&x| x as i32).sum::<i32>() / channels as i32;
+                            (avg - 32768) as i16
+                        }).collect()
                     };
 
-                    // Simple resampling to 16kHz if needed
-                    let resampled_data = if sample_rate == 16000 {
-                        mono_data
-                    } else {
-                        // Basic downsampling - take every nth sample
-                        let ratio = sample_rate as f32 / 16000.0;
-                        mono_data.iter().step_by(ratio as usize).cloned().collect()
-                    };
+                    // Convert to f32, resample, then back to i16
+                    let mono_f32: Vec<f32> = mono_i16.iter().map(|&s| s as f32 / i16::MAX as f32).collect();
+                    let resampled = Self::resample_mono_to_16k(&mono_f32, sample_rate);
+                    let pcm_data: Vec<i16> = resampled.iter()
+                        .map(|&s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
+                        .collect();
 
                     // Convert to bytes (little-endian)
-                    let bytes: Vec<u8> = resampled_data.iter().flat_map(|&sample| sample.to_le_bytes()).collect();
+                    let bytes: Vec<u8> = pcm_data.iter().flat_map(|&sample| sample.to_le_bytes()).collect();
 
                     if let Err(e) = sender.try_send(bytes) {
                         match e {
