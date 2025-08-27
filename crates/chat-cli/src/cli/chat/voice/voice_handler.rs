@@ -193,7 +193,8 @@ impl VoiceHandler {
                     
                     // End if no speech for silence_timeout duration
                     if speech_silence >= silence_timeout {
-                        println!("\n🔇 No voice activity detected - ending voice input");
+                        println!();
+                        println!("🔇 No voice activity detected - ending voice input");
                         break;
                     }
                     
@@ -214,39 +215,15 @@ impl VoiceHandler {
 
         // No audio forward handle to abort in streaming mode
         
-        // Finalize display and show options
-        display.finalize(&current_transcript)?;
-        
-        // Show complete transcription if we have content
-        if !current_transcript.trim().is_empty() {
-            println!();
-            println!("✅ Transcription complete!");
-            println!("📝 Complete transcribed text:");
-            
-            // Create properly sized box with text wrapping
-            let box_width = 79;
-            let wrapped_lines = Self::wrap_text_to_lines(&current_transcript, box_width - 4);
-
-            // Top border
-            println!("┌{}┐", "─".repeat(box_width - 2));
-
-            // Content with proper padding
-            for line in wrapped_lines {
-                let padding = (box_width - 4).saturating_sub(line.len());
-                println!("│ {}{} │", line, " ".repeat(padding));
-            }
-
-            // Bottom border
-            println!("└{}┘", "─".repeat(box_width - 2));
-            println!();
-        }
-        
-        // Handle user input for edit options
-        let final_result = self.handle_transcript_options(&current_transcript).await?;
-        
+        // Clean up live HUD display
         display.cleanup()?;
-        
-        Ok(final_result)
+
+        if current_transcript.trim().is_empty() {
+            return Ok(None);
+        }
+
+        // Use the same boxed UI + options as Whisper/Parakeet
+        return self.present_transcript_for_editing(current_transcript).await;
     }
 
     async fn handle_transcript_options(&self, transcript: &str) -> Result<Option<String>> {
@@ -352,31 +329,28 @@ impl VoiceHandler {
         // Create channels for user input handling
         let (input_tx, mut input_rx) = mpsc::channel::<InputEvent>(1);
 
-        // Spawn task to handle Enter key input using simple stdin
+        // Use raw key events to avoid buffered newlines
+        use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+        use crossterm::terminal::{enable_raw_mode, disable_raw_mode};
+
+        enable_raw_mode().ok();
+
         let input_handle = {
             let input_sender = input_tx.clone();
             tokio::spawn(async move {
-                use std::io::{stdin, BufRead, BufReader};
-                
-                let input_future = tokio::task::spawn_blocking(move || -> InputEvent {
-                    let stdin = stdin();
-                    let mut reader = BufReader::new(stdin);
-                    let mut line = String::new();
-                    
-                    match reader.read_line(&mut line) {
-                        Ok(0) => InputEvent::CtrlC, // EOF indicates Ctrl+C or Ctrl+D
-                        Ok(_) => InputEvent::Enter,
-                        Err(_) => InputEvent::Error,
+                loop {
+                    if event::poll(std::time::Duration::from_millis(50)).unwrap_or(false) {
+                        if let Ok(Event::Key(k)) = event::read() {
+                            if k.code == KeyCode::Enter {
+                                let _ = input_sender.send(InputEvent::Enter).await;
+                                break;
+                            }
+                            if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
+                                let _ = input_sender.send(InputEvent::CtrlC).await;
+                                break;
+                            }
+                        }
                     }
-                });
-
-                match input_future.await {
-                    Ok(event) => {
-                        let _ = input_sender.send(event).await;
-                    },
-                    Err(_) => {
-                        let _ = input_sender.send(InputEvent::Error).await;
-                    },
                 }
             })
         };
@@ -462,7 +436,8 @@ impl VoiceHandler {
                             // Auto-stop conditions for batch mode
                             if voice_silence >= silence_timeout && !audio_buffer.is_empty() {
                                 debug!("Voice silence timeout reached, ending recording");
-                                println!("\n🔇 No voice activity detected - ending recording");
+                                println!();
+                                println!("🔇 No voice activity detected - ending recording");
                                 break;
                             }
                             
@@ -489,12 +464,10 @@ impl VoiceHandler {
 
         // Clean up input task properly
         input_handle.abort();
+        disable_raw_mode().ok();
         
         // Move to new line after recording
         println!();
-        
-        // Longer delay to let stdin settle and any buffered input to be processed
-        tokio::time::sleep(Duration::from_millis(300)).await;
 
         if audio_buffer.is_empty() {
             println!("🔇 No audio recorded");
@@ -509,7 +482,7 @@ impl VoiceHandler {
                     self.present_transcript_for_editing(transcript).await
                 }
                 Ok(_) => {
-                    println!("🔇 No speech detected");
+                    // Silent handling for no speech - clean like Whisper
                     Ok(None)
                 }
                 Err(e) => {
@@ -531,21 +504,35 @@ impl VoiceHandler {
             .map_err(|e| eyre::eyre!("Stream transcribe failed: {}", e))?;
 
         let deadline = Instant::now() + Duration::from_secs(60);
-        let mut last_text = String::new();
+
+        // Keep the last partial we've seen and also capture final text when present.
+        // (Some providers only populate partial_text, some only on the final event.)
+        let mut last_partial = String::new();
+        let mut final_text: Option<String> = None;
 
         while Instant::now() < deadline {
             match timeout(Duration::from_secs(5), rx.recv()).await {
                 Ok(Some(evt)) => {
-                    if !evt.partial_text.trim().is_empty() {
-                        last_text = evt.partial_text.clone();
+                    let p = evt.partial_text.trim();
+                    if !p.is_empty() {
+                        last_partial = p.to_string();
                     }
-                    if evt.is_final { break; }
+                    if evt.is_final {
+                        final_text = if !p.is_empty() {
+                            Some(p.to_string())
+                        } else if !last_partial.is_empty() {
+                            Some(last_partial.clone())
+                        } else {
+                            None
+                        };
+                        break;
+                    }
                 }
-                Ok(None) => break, // channel closed
-                Err(_) => break,   // idle timeout
+                Ok(None) | Err(_) => break,
             }
         }
-        Ok(last_text)
+
+        Ok(final_text.unwrap_or_else(|| last_partial))
     }
 
     fn update_single_line(transcript: &str, elapsed: f32, activity_level: u8) {
@@ -605,6 +592,14 @@ impl VoiceHandler {
         println!("└{}┘", "─".repeat(box_width - 2));
 
         println!();
+
+        // Auto-submit in batch mode - skip menu entirely for immediate response
+        let autosubmit = std::env::var("Q_VOICE_AUTOSUBMIT").as_deref() == Ok("1") || true; // Always auto-submit for batch
+        if autosubmit {
+            // Skip menu entirely in batch mode - immediate submission like Whisper
+            return Ok(Some(transcript));
+        }
+
         println!("🎯 Options:");
         println!("   • Press [Enter] to submit as-is");
         println!("   • Press [e] + [Enter] to edit");

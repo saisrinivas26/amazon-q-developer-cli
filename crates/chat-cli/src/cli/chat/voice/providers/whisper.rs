@@ -83,36 +83,7 @@ impl WhisperProvider {
             }
         }
 
-        // Check for Metal (Mac GPU) support
-        self.check_metal_support().await;
-
         Ok(())
-    }
-
-    async fn check_metal_support(&self) {
-        let metal_check = r#"
-try:
-    import torch
-    if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-        print("✅ Metal Performance Shaders (MPS) available for GPU acceleration")
-    else:
-        print("ℹ️  Using CPU for Whisper (MPS not available)")
-except:
-    print("ℹ️  Using CPU for Whisper")
-"#;
-
-        if let Ok(output) = Command::new(&self.python_executable)
-            .args(&["-c", metal_check])
-            .output()
-            .await
-        {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                if !stdout.trim().is_empty() {
-                    println!("{}", stdout.trim());
-                }
-            }
-        }
     }
 
     async fn preload_model(&self) -> VoiceResult<()> {

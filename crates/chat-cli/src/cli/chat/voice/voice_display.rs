@@ -57,9 +57,6 @@ impl VoiceDisplay {
         self.current_transcript = final_text.to_string();
         self.is_final = true;
         self.draw_voice_box()?;
-        
-        // Show edit options
-        self.show_edit_options()?;
         Ok(())
     }
 
@@ -101,24 +98,6 @@ impl VoiceDisplay {
         // Empty line for spacing
         println!();
         
-        // Options line (only when final)
-        if self.is_final {
-            println!("Options: [Enter] Submit as-is  [E] Edit  [Ctrl+C] Cancel");
-        }
-        
-        io::stdout().flush()?;
-        Ok(())
-    }
-
-    fn show_edit_options(&self) -> io::Result<()> {
-        execute!(
-         
-            io::stdout(),
-            cursor::Show,
-            cursor::MoveTo(0, 12)
-        )?;
-        
-        print!("\n> ");
         io::stdout().flush()?;
         Ok(())
     }

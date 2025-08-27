@@ -10,6 +10,9 @@ use tokio::time::{timeout, Duration};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use std::process::Stdio;
+use tokio::process::Command as TokioCommand;
+use serde_json;
 
 struct PyWorker {
     child: Child,
@@ -48,7 +51,7 @@ impl ParakeetProvider {
         // Use standard HuggingFace repo ID - it will automatically use cached model if available  
         let model_path = None; // Let HuggingFace handle caching automatically
 
-        let provider = Self {
+        let mut provider = Self {
             language,
             python_executable,
             vad_threshold_db,
@@ -60,6 +63,7 @@ impl ParakeetProvider {
         provider.check_dependencies().await?;
         provider.setup_model().await?;
         provider.preload_model().await?;
+        provider.start_worker().await?;        // NEW: keep the model hot
 
         Ok(provider)
     }
@@ -108,29 +112,8 @@ impl ParakeetProvider {
     }
 
     async fn check_metal_support(&self) {
-        let metal_check = r#"
-try:
-    import torch
-    if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-        print("✅ Metal Performance Shaders (MPS) available for GPU acceleration")
-    else:
-        print("ℹ️  Using CPU for Parakeet (MPS not available)")
-except:
-    print("ℹ️  Using CPU for Parakeet")
-"#;
-
-        if let Ok(output) = Command::new(&self.python_executable)
-            .args(&["-c", metal_check])
-            .output()
-            .await
-        {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                if !stdout.trim().is_empty() {
-                    println!("{}", stdout.trim());
-                }
-            }
-        }
+        // Always use CPU for Parakeet stability on macOS
+        // Silent - no need to announce CPU usage
     }
 
     async fn setup_model(&self) -> VoiceResult<()> {
@@ -319,6 +302,101 @@ else:
         self.check_model_cached(&model_patterns).await
     }
 
+    async fn start_worker(&mut self) -> VoiceResult<()> {
+        let py = &self.python_executable;
+
+        let script = r#"
+import os, sys, json, warnings, logging
+from contextlib import redirect_stdout, redirect_stderr
+
+os.environ.update({
+    "NEMO_LOG_LEVEL": "ERROR",
+    "TRANSFORMERS_VERBOSITY": "error",
+    "HF_HUB_DISABLE_PROGRESS_BARS": "1",
+    "PYTHONWARNINGS": "ignore",
+    "TOKENIZERS_PARALLELISM": "false",
+})
+
+warnings.filterwarnings("ignore")
+logging.basicConfig(level=logging.ERROR)
+
+try:
+    fnull = open(os.devnull, "w")
+    with redirect_stdout(fnull), redirect_stderr(fnull):
+        import nemo.collections.asr as nemo_asr
+        m = nemo_asr.models.ASRModel.from_pretrained("nvidia/parakeet-tdt-0.6b-v2").to("cpu")
+    m.eval()
+except Exception as e:
+    print(json.dumps({"ok": False, "phase": "load", "error": str(e)}))
+    sys.stdout.flush()
+    raise
+
+print("READY"); sys.stdout.flush()
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        req = json.loads(line)
+        if req.get("cmd") == "transcribe":
+            wav = req.get("wav")
+            if not wav or not os.path.exists(wav):
+                print(json.dumps({"ok": False, "error": "WAV not found"})); sys.stdout.flush(); continue
+            outs = m.transcribe([wav], return_hypotheses=False, timestamps=False)
+            text = ""
+            if outs:
+                text = outs[0].strip() if isinstance(outs[0], str) else (getattr(outs[0], "text", "") or str(outs[0]) or "")
+                text = text.strip()
+            print(json.dumps({"ok": True, "text": text})); sys.stdout.flush()
+    except Exception as e:
+        print(json.dumps({"ok": False, "error": str(e)})); sys.stdout.flush()
+"#;
+
+        let mut child = TokioCommand::new(py)
+            .args(&["-u", "-c", script])   // -u = unbuffered
+            .env("NEMO_LOG_LEVEL", "ERROR")
+            .env("TRANSFORMERS_VERBOSITY", "error")
+            .env("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+            .env("PYTHONWARNINGS", "ignore")
+            .env("TOKENIZERS_PARALLELISM", "false")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .map_err(|e| VoiceError::ProviderInitFailed(e.to_string()))?;
+
+        let stdin = child.stdin.take().ok_or_else(|| VoiceError::ProviderInitFailed("No worker stdin".into()))?;
+        let mut stdout = BufReader::new(child.stdout.take().ok_or_else(|| VoiceError::ProviderInitFailed("No worker stdout".into()))?);
+
+        // Wait for READY - loop until we see it (ignore NeMo chatter)
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            if std::time::Instant::now() > deadline {
+                return Err(VoiceError::ProviderInitFailed("Worker startup timeout".into()));
+            }
+            
+            let mut line = String::new();
+            let n = timeout(Duration::from_secs(5), stdout.read_line(&mut line)).await
+                .map_err(|_| VoiceError::ProviderInitFailed("Worker startup read timeout".into()))?
+                .map_err(|e| VoiceError::ProviderInitFailed(e.to_string()))?;
+
+            if n == 0 { // EOF
+                return Err(VoiceError::ProviderInitFailed("Worker exited before READY".into()));
+            }
+
+            let trimmed = line.trim();
+            if trimmed == "READY" {
+                break; // Success!
+            }
+
+            // Log and ignore noisy lines from NeMo/HF
+            eprintln!("(worker stdout noise) {}", trimmed);
+        }
+
+        *self.python_worker.lock().await = Some(PyWorker { child, stdin, stdout });
+        Ok(())
+    }
+
     async fn check_model_cached(&self, model_patterns: &[&str]) -> bool {
         for pattern in model_patterns {
             let check_script = format!(
@@ -434,6 +512,60 @@ print("MODEL_CACHED" if model_found else "MODEL_NOT_CACHED")
     }
 
     async fn transcribe_with_parakeet(&self, wav_path: &str) -> VoiceResult<String> {
+        eprintln!("🔍 DEBUG: Starting Parakeet transcription for: {}", wav_path);
+        
+        // Fast path: JSON-RPC to the hot worker
+        if let Some(w) = self.python_worker.lock().await.as_mut() {
+            eprintln!("🔍 DEBUG: Using hot worker path (fast transcription)");
+            let req = format!("{{\"cmd\":\"transcribe\",\"wav\":\"{}\"}}\n", wav_path);
+            eprintln!("🔍 DEBUG: Sending JSON request: {}", req.trim());
+            
+            w.stdin.write_all(req.as_bytes()).await
+                .map_err(|e| VoiceError::TranscriptionFailed(e.to_string()))?;
+            w.stdin.flush().await
+                .map_err(|e| VoiceError::TranscriptionFailed(e.to_string()))?;
+
+            eprintln!("🔍 DEBUG: Waiting for worker response...");
+            let mut line = String::new();
+            loop {
+                line.clear();
+                let n = timeout(Duration::from_secs(60), w.stdout.read_line(&mut line)).await
+                    .map_err(|_| VoiceError::TranscriptionFailed("Worker response timeout".into()))?
+                    .map_err(|e| VoiceError::TranscriptionFailed(e.to_string()))?;
+                if n == 0 { 
+                    return Err(VoiceError::TranscriptionFailed("Worker closed pipe".into())); 
+                }
+
+                let trimmed = line.trim();
+                if trimmed.is_empty() { 
+                    continue; 
+                }
+
+                eprintln!("🔍 DEBUG: Worker response: {}", trimmed);
+                match serde_json::from_str::<serde_json::Value>(trimmed) {
+                    Ok(v) if v.get("ok").is_some() => {
+                        if v["ok"].as_bool().unwrap_or(false) {
+                            let text = v["text"].as_str().unwrap_or("").to_string();
+                            eprintln!("🔍 DEBUG: Hot worker success: '{}'", text);
+                            return Ok(text);
+                        } else {
+                            let err = v["error"].as_str().unwrap_or("Unknown worker error").to_string();
+                            eprintln!("🔍 DEBUG: Hot worker error: {}", err);
+                            return Err(VoiceError::TranscriptionFailed(err));
+                        }
+                    }
+                    _ => {
+                        // Surface for debugging, then keep waiting
+                        eprintln!("(worker stdout noise) {}", trimmed);
+                        continue;
+                    }
+                }
+            }
+        }
+
+        eprintln!("🔍 DEBUG: No hot worker available, using fallback one-shot Python");
+
+        // Fallback: your existing one-shot Python path
         // Determine model source - local path or HuggingFace ID
         let model_source = if let Some(model_path) = &self.model_path {
             format!("\"{}\"", model_path)
@@ -466,111 +598,63 @@ torch.set_float32_matmul_precision("high")
 torch.backends.cudnn.benchmark = False
 torch.set_num_threads(4)
 
+# Force CPU-only mode to prevent MPS hanging on macOS
 device = "cpu"
-try:
-    if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-        device = "mps"
-        logger.info("Using Metal Performance Shaders (MPS) for GPU acceleration")
-    else:
-        logger.info("Using CPU for transcription")
-except Exception as torch_error:
-    logger.warning(f"PyTorch device check failed: {{torch_error}}")
-    device = "cpu"
-
-@torch.inference_mode()
-def transcribe_audio_optimized(model, audio_path, device):
-    """
-    Inference in FP32 (MPS + NeMo can assert with FP16).
-    If MPS path fails for any reason, automatically retry on CPU.
-    """
-    try:
-        return model.transcribe([audio_path], timestamps=False)
-    except Exception as e:
-        import traceback, torch
-        print(f"DEBUG: MPS/primary path failed: {{e}}", file=sys.stderr)
-        traceback.print_exc()
-        try:
-            # Fallback to CPU FP32
-            model = model.to("cpu")
-            torch.set_default_dtype(torch.float32)
-            return model.transcribe([audio_path], timestamps=False)
-        except Exception as e2:
-            print(f"ERROR:Fallback to CPU failed: {{e2}}", file=sys.stderr)
-            raise
 
 try:
     import nemo.collections.asr as nemo_asr
+    print("DEBUG: Imported NeMo ASR", file=sys.stderr)
 
-    # DEBUG: Check audio file before transcription
     audio_path = "{0}"
-    print(f"DEBUG: Processing audio file: {{audio_path}}", file=sys.stderr)
+    print(f"DEBUG: Audio path: {{audio_path}}", file=sys.stderr)
 
-    # Load audio (faster than librosa)
-    try:
-        audio_data, sample_rate = sf.read(audio_path, dtype="float32", always_2d=False)
-        print(f"DEBUG: Audio loaded - duration={{len(audio_data)/sample_rate:.2f}}s, sample_rate={{sample_rate}}, samples={{len(audio_data)}}", file=sys.stderr)
-        audio_rms = float(np.sqrt(np.mean(audio_data**2)))
-        audio_max = float(np.max(np.abs(audio_data)))
-        print(f"DEBUG: Audio levels - RMS={{audio_rms:.6f}}, Max={{audio_max:.6f}}", file=sys.stderr)
-        if audio_max < 0.001:
-            print("DEBUG: WARNING - Audio levels very low, may be silent", file=sys.stderr)
-    except Exception as audio_error:
-        print(f"DEBUG: Audio file error: {{audio_error}}", file=sys.stderr)
-    
-    # Load NVIDIA Parakeet model for transcription (local or remote)
-    print("DEBUG: Loading Parakeet model...", file=sys.stderr)
+    # Check if audio file exists and has data
+    if not os.path.exists(audio_path):
+        print("ERROR:Audio file not found", file=sys.stderr)
+        sys.exit(1)
+    file_size = os.path.getsize(audio_path)
+    print(f"DEBUG: Audio file size: {{file_size}} bytes", file=sys.stderr)
+    if file_size < 100:  # Arbitrary small size check
+        print("DEBUG: Audio file too small, likely silent", file=sys.stderr)
+        print("TRANSCRIPT:", flush=True)
+        sys.exit(0)
+
+    # Load model
+    print("DEBUG: Loading model...", file=sys.stderr)
     with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
         asr_model = nemo_asr.models.ASRModel.from_pretrained({1})
-        if device != "cpu":
-            try:
-                asr_model = asr_model.to(device)
-            except Exception as gpu_error:
-                logger.warning(f"GPU setup failed, falling back to CPU: {{gpu_error}}")
-                device = "cpu"
-                asr_model = asr_model.to(device)
-        else:
-            asr_model = asr_model.to(device)
-    
-    print(f"DEBUG: Model loaded on {{device}}", file=sys.stderr)
-    
-    # Enhanced transcription with optimized function
+    asr_model = asr_model.to(device)
+    print("DEBUG: Model loaded on CPU", file=sys.stderr)
+
+    # Transcribe (force plain strings)
     print("DEBUG: Starting transcription...", file=sys.stderr)
-    transcript_list = transcribe_audio_optimized(asr_model, audio_path, device)
-    print(f"DEBUG: Transcription completed, results={{len(transcript_list) if transcript_list else 0}}", file=sys.stderr)
-    
-    if transcript_list and len(transcript_list) > 0:
-        result = transcript_list[0]
-        print(f"DEBUG: Raw result type={{type(result)}}, content={{repr(result)}}", file=sys.stderr)
-        
-        transcript = result.text.strip() if hasattr(result, 'text') else str(result).strip()
-        print(f"DEBUG: Extracted transcript='{{transcript}}'", file=sys.stderr)
-        
-        # Optional: Extract word-level timestamps if available
-        timestamps_info = ""
-        if hasattr(result, 'timestamp') and result.timestamp:
-            if 'word' in result.timestamp:
-                word_timestamps = result.timestamp['word']
-                timestamps_info = f" [Words: {{len(word_timestamps)}}]"
-                print(f"DEBUG: Found {{len(word_timestamps)}} word timestamps", file=sys.stderr)
-        
-        if transcript:
-            print("TRANSCRIPT:" + transcript + timestamps_info, flush=True)
+    outputs = asr_model.transcribe([audio_path], return_hypotheses=False, timestamps=False)
+    print(f"DEBUG: Transcription outputs type={{type(outputs)}}, len={{len(outputs) if outputs else 0}}", file=sys.stderr)
+
+    text = ""
+    if outputs:
+        # When return_hypotheses=False NeMo returns List[str]
+        if isinstance(outputs[0], str):
+            text = outputs[0].strip()
         else:
-            print("TRANSCRIPT:", flush=True)
-    else:
-        print("DEBUG: No transcript results returned", file=sys.stderr)
-        print("TRANSCRIPT:", flush=True)
+            # Fallback if toolkit changes shape
+            item = outputs[0]
+            text = getattr(item, "text", "") if hasattr(item, "text") else (str(item) if item else "")
+            text = (text or "").strip()
+
+    print("TRANSCRIPT:" + text, flush=True)
         
 except Exception as e:
-    logger.error(f"NVIDIA Parakeet transcription failed: {{e}}")
     print(f"ERROR:{{str(e)}}", file=sys.stderr)
+    import traceback
+    traceback.print_exc(file=sys.stderr)
     raise
 "#,
             wav_path, model_source
         );
 
         let result = timeout(
-            Duration::from_secs(45), // Increased timeout for GPU acceleration
+            Duration::from_secs(240), // Increased timeout for model loading on macOS
             Command::new(&self.python_executable)
                 .args(&["-c", &python_script])
                 .output()
@@ -581,266 +665,122 @@ except Exception as e:
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 
-                // Log transcription success/failure without excessive debug output
-                if output.status.success() {
-                    if stdout.lines().any(|line| line.starts_with("TRANSCRIPT:") && !line.strip_prefix("TRANSCRIPT:").unwrap_or("").trim().is_empty()) {
-                        println!("📝 NVIDIA Parakeet transcription successful");
-                    }
-                } else {
-                    println!("❌ NVIDIA Parakeet transcription failed with exit code: {}", output.status);
-                }
-                
-                // Extract transcript
-                for line in stdout.lines() {
-                    if line.starts_with("TRANSCRIPT:") {
-                        let transcript = line.strip_prefix("TRANSCRIPT:").unwrap_or("").trim();
-                        // Remove timestamp info from final transcript
-                        let clean_transcript = if let Some(bracket_pos) = transcript.find(" [Words:") {
-                            &transcript[..bracket_pos]
-                        } else {
-                            transcript
-                        };
-                        return Ok(clean_transcript.to_string());
-                    } else if line.starts_with("ERROR:") {
-                        return Err(VoiceError::TranscriptionFailed(
-                            format!("NVIDIA Parakeet transcription error: {}", 
-                                line.strip_prefix("ERROR:").unwrap_or(""))
-                        ));
-                    }
-                }
-                
-                // If we got here, check if there were any errors in stderr
-                if !stderr.trim().is_empty() {
+                // NEW: bail if Python failed (segfault/import error/etc.)
+                if !output.status.success() {
                     return Err(VoiceError::TranscriptionFailed(
-                        format!("Python script failed with stderr: {}", stderr.trim())
+                        format!(
+                            "Python exited with status {:?}. stderr:\n{}",
+                            output.status.code(),
+                            stderr.trim()
+                        ),
                     ));
                 }
                 
+                // Silent operation for clean batch mode interface
+                
+                // 1) Happy path - extract transcript
+                if let Some(line) = stdout.lines().find(|l| l.starts_with("TRANSCRIPT:")) {
+                    let transcript = line.strip_prefix("TRANSCRIPT:").unwrap_or("").trim();
+                    // Remove timestamp info from final transcript
+                    let clean_transcript = if let Some(bracket_pos) = transcript.find(" [Words:") {
+                        &transcript[..bracket_pos]
+                    } else {
+                        transcript
+                    };
+                    return Ok(clean_transcript.to_string());
+                }
+
+                // 2) Explicit error markers in stdout or stderr
+                if stdout.contains("ERROR:") || stderr.contains("ERROR:") {
+                    return Err(VoiceError::TranscriptionFailed(
+                        format!("Python error: {}", stderr.trim())
+                    ));
+                }
+
+                // 3) NEW: Debug on fallback to empty
+                eprintln!("DEBUG: Parakeet stdout: {}", stdout);
+                eprintln!("DEBUG: Parakeet stderr: {}", stderr);
                 Ok(String::new())
             }
             Ok(Err(e)) => Err(VoiceError::TranscriptionFailed(format!("Python command failed: {}", e))),
-            Err(_) => Err(VoiceError::TranscriptionFailed("NVIDIA Parakeet transcription timed out after 45 seconds".to_string())),
+            Err(_) => Err(VoiceError::TranscriptionFailed("NVIDIA Parakeet transcription timed out after 240 seconds".to_string())),
         }
     }
 }
 
 #[async_trait]
 impl TranscriptionProvider for ParakeetProvider {
-    async fn stream_transcribe(&self, mut audio_stream: AudioStream, _options: &TranscriptionOptions) -> VoiceResult<TranscriptionStream> {
-        let (tx, rx) = mpsc::channel(100);
+    async fn stream_transcribe(
+        &self,
+        mut audio_stream: AudioStream,
+        _options: &TranscriptionOptions,
+    ) -> VoiceResult<TranscriptionStream> {
+        let (tx, rx) = mpsc::channel(1);
 
-        // Capture instance fields needed in the async task
-        let vad_threshold_db = self.vad_threshold_db;
-        let python_executable = self.python_executable.clone();
+        // Capture just what we need for the batch processing
         let provider_self = Self {
             language: self.language.clone(),
-            python_executable: python_executable.clone(),
-            vad_threshold_db,
+            python_executable: self.python_executable.clone(),
+            vad_threshold_db: self.vad_threshold_db,
             model_path: self.model_path.clone(),
-            python_worker: self.python_worker.clone(), // ✅ reuse worker across the whole session
+            python_worker: self.python_worker.clone(), // ✅ reuse worker for session persistence
         };
 
-        // Advanced streaming transcription with periodic processing from legacy
         tokio::spawn(async move {
-            let mut audio_buffer = Vec::new();
-            let mut processed_buffer_size = 0;
-            let mut last_process_time = std::time::Instant::now();
-            let mut last_activity_event = std::time::Instant::now();
-            let session_start_time = std::time::Instant::now();
-            let process_interval = std::time::Duration::from_millis(1000); // Faster processing for live streaming
-            let activity_event_interval = std::time::Duration::from_millis(150); // More frequent partial updates
-            let session_timeout = std::time::Duration::from_secs(5);
-            let max_session_time = std::time::Duration::from_secs(30);
-            let mut final_transcript = String::new();
-            let mut first_chunk = true;
-            let mut has_recent_audio = false;
-            let mut last_voice_activity_time = std::time::Instant::now();
+            let start = std::time::Instant::now();
+            let mut buf = Vec::<u8>::new();
 
-            let mut timer_interval = tokio::time::interval(std::time::Duration::from_millis(100));
-            timer_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-            loop {
-                tokio::select! {
-                    // Handle audio events
-                    audio_event = audio_stream.recv() => {
-                        match audio_event {
-                            Some(audio_blob) => {
-                                let chunk_bytes = &audio_blob.data;
-                                
-                                // Use Voice Activity Detection
-                                let is_voice_activity = provider_self.detect_voice_activity(chunk_bytes, vad_threshold_db);
-                                
-                                // Always add to buffer for transcription
-                                audio_buffer.extend_from_slice(chunk_bytes);
-                                
-                                // Track voice activity for streaming
-                                has_recent_audio = true;
-                                last_voice_activity_time = std::time::Instant::now();
-                                
-                                if is_voice_activity {
-                                    has_recent_audio = true;
-                                    last_voice_activity_time = std::time::Instant::now();
-                                }
-                            }
-                            None => break, // Channel closed
-                        }
-                    }
-                    
-                    // Timer ticks for activity events and processing
-                    _ = timer_interval.tick() => {
-                        // Send activity events when we have recent audio
-                        if has_recent_audio && last_activity_event.elapsed() >= activity_event_interval {
-                            let result = tx.send(StreamingTranscription::partial(
-                                final_transcript.clone(),
-                                f32::NAN, // No confidence data available from Parakeet
-                                session_start_time.elapsed(),
-                            )).await;
-                            if result.is_err() {
-                                break;
-                            }
-                            last_activity_event = std::time::Instant::now();
-                        }
-                        
-                        // Process audio chunks for transcription
-                        let should_process = if first_chunk {
-                            last_process_time.elapsed() > std::time::Duration::from_secs(1) && !audio_buffer.is_empty()
-                        } else {
-                            last_process_time.elapsed() > process_interval && !audio_buffer.is_empty()
-                        };
-                        
-                        if should_process {
-                            let new_audio_size = audio_buffer.len();
-                            if new_audio_size > processed_buffer_size {
-                                let new_data_threshold = 16000 * 2 * 2; // ~2 seconds of audio
-                                if new_audio_size - processed_buffer_size >= new_data_threshold || first_chunk {
-                                    
-                                    let new_audio_chunk = if first_chunk {
-                                        &audio_buffer[..]
-                                    } else {
-                                        &audio_buffer[processed_buffer_size..]
-                                    };
-                                    
-                                    if !new_audio_chunk.is_empty() {
-                                        match provider_self.create_wav_file(new_audio_chunk, 16000).await {
-                                            Ok(wav_path) => {
-                                                match provider_self.transcribe_with_parakeet(&wav_path).await {
-                                                    Ok(new_text) if !new_text.trim().is_empty() => {
-                                                        let cleaned_text = new_text.trim().to_string();
-                                                        
-                                                        // Append new text to final transcript
-                                                        if first_chunk {
-                                                            final_transcript = cleaned_text;
-                                                        } else {
-                                                            if !final_transcript.is_empty() && 
-                                                               !final_transcript.ends_with('.') && 
-                                                               !final_transcript.ends_with('!') && 
-                                                               !final_transcript.ends_with('?') {
-                                                                final_transcript.push(' ');
-                                                            } else if !final_transcript.is_empty() {
-                                                                final_transcript.push(' ');
-                                                            }
-                                                            final_transcript.push_str(&cleaned_text);
-                                                        }
-                                                        
-                                                                                        let _ = tx.send(StreamingTranscription::new(
-                                                            final_transcript.clone(),
-                                                            false, // partial result
-                                                        )).await;
-                                                    }
-                                                    Ok(_) => {
-                                                        // Empty transcription - continue listening
-                                                    }
-                                                    Err(e) => {
-                                                        eprintln!("NVIDIA Parakeet transcription error: {}", e);
-                                                    }
-                                                }
-                                                let _ = std::fs::remove_file(wav_path);
-                                            }
-                                            Err(e) => {
-                                                eprintln!("WAV file creation failed: {}", e);
-                                            }
-                                        }
-                                    }
-                                    processed_buffer_size = new_audio_size;
-                                }
-                            }
-                            last_process_time = std::time::Instant::now();
-                            first_chunk = false;
-                        }
-
-                        // Reset audio activity flag if no recent voice activity
-                        if last_voice_activity_time.elapsed() > std::time::Duration::from_millis(1000) {
-                            has_recent_audio = false;
-                        }
-
-                        // Check for session timeout conditions
-                        let silence_time = last_voice_activity_time.elapsed();
-                        let total_session_time = session_start_time.elapsed();
-                        
-                        if silence_time >= session_timeout || total_session_time >= max_session_time {
-                            if silence_time >= session_timeout {
-                                println!("🔇 No voice activity for {}s - ending voice input", silence_time.as_secs());
-                            } else {
-                                println!("🔇 Maximum session time reached ({}s) - ending voice input", total_session_time.as_secs());
-                            }
-                            break;
-                        }
-                    }
-                }
+            // Read all audio (pure batch mode - no live processing)
+            while let Some(blob) = audio_stream.recv().await {
+                buf.extend_from_slice(&blob.data);
             }
 
-            // Send final result when recording stops
-            if !final_transcript.is_empty() {
-                let _ = tx.send(StreamingTranscription::final_result(
-                    final_transcript,
-                    f32::NAN, // No confidence data available from Parakeet
-                    session_start_time.elapsed(),
-                )).await;
-            } else if !audio_buffer.is_empty() {
-                // Process remaining audio one final time
-                match provider_self.create_wav_file(&audio_buffer, 16000).await {
-                    Ok(wav_path) => {
-                        match provider_self.transcribe_with_parakeet(&wav_path).await {
-                            Ok(transcript) if !transcript.trim().is_empty() => {
-                                let _ = tx.send(StreamingTranscription::final_result(
-                                    transcript.trim().to_string(),
-                                    f32::NAN, // No confidence data available from Parakeet
-                                    session_start_time.elapsed(),
-                                )).await;
-                            }
-                            Ok(_) => {
-                                let _ = tx.send(StreamingTranscription::final_result(
-                                    "No speech detected".to_string(),
-                                    0.5,
-                                    session_start_time.elapsed(),
-                                )).await;
-                            }
-                            Err(e) => {
-                                eprintln!("NVIDIA Parakeet transcription error: {}", e);
-                                let _ = tx.send(StreamingTranscription::final_result(
-                                    "Transcription failed".to_string(),
-                                    0.0,
-                                    session_start_time.elapsed(),
-                                )).await;
-                            }
-                        }
-                        let _ = std::fs::remove_file(wav_path);
-                    }
-                    Err(e) => {
-                        eprintln!("Failed to create WAV file: {}", e);
-                        let _ = tx.send(StreamingTranscription::final_result(
-                            "Audio processing failed".to_string(),
-                            0.0,
-                            session_start_time.elapsed(),
-                        )).await;
-                    }
-                }
-            } else {
+            if buf.is_empty() {
                 let _ = tx.send(StreamingTranscription::final_result(
                     "No audio recorded".to_string(),
                     0.0,
-                    session_start_time.elapsed(),
+                    start.elapsed(),
                 )).await;
+                return;
+            }
+
+            // Single transcription pass like Whisper - 16 kHz mono PCM expected
+            match provider_self.create_wav_file(&buf, 16_000).await {
+                Ok(wav) => {
+                    let result = provider_self.transcribe_with_parakeet(&wav).await;
+                    let _ = std::fs::remove_file(&wav);
+
+                    match result {
+                        Ok(t) if !t.trim().is_empty() => {
+                            let _ = tx.send(StreamingTranscription::final_result(
+                                t.trim().to_string(),
+                                0.95, // Finite confidence for successful transcription
+                                start.elapsed(),
+                            )).await;
+                        }
+                        Ok(_) => {
+                            let _ = tx.send(StreamingTranscription::final_result(
+                                "No speech detected".to_string(),
+                                0.5,
+                                start.elapsed(),
+                            )).await;
+                        }
+                        Err(_) => {
+                            let _ = tx.send(StreamingTranscription::final_result(
+                                "Transcription failed".to_string(),
+                                0.0,
+                                start.elapsed(),
+                            )).await;
+                        }
+                    }
+                }
+                Err(_) => {
+                    let _ = tx.send(StreamingTranscription::final_result(
+                        "Audio processing failed".to_string(),
+                        0.0,
+                        start.elapsed(),
+                    )).await;
+                }
             }
         });
 
@@ -848,6 +788,6 @@ impl TranscriptionProvider for ParakeetProvider {
     }
 
     fn supports_streaming(&self) -> bool {
-        true
+        false  // Pure batch mode like Whisper
     }
 }

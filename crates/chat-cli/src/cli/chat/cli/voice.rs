@@ -30,9 +30,9 @@ pub struct VoiceArgs {
     #[arg(long, hide = true)]
     pub set_language: Option<String>,
 
-    /// Transcription backend to use
+    /// Transcription model to use
     #[arg(long, value_enum, default_value = "aws-transcribe")]
-    pub backend: TranscriptionBackendArg,
+    pub model: TranscriptionBackendArg,
 
     /// Enable streaming transcription (real-time)
     #[arg(long)]
@@ -104,7 +104,7 @@ impl VoiceArgs {
         let aws_config = aws_config::defaults(behavior_version()).load().await;
 
         // Using hardcoded English but still showing user's language preference in UI
-        match VoiceHandler::new(&aws_config, self.backend.clone().into()).await {
+        match VoiceHandler::new(&aws_config, self.model.clone().into()).await {
             Ok(voice_handler) => {
                 // Check voice setup
                 if let Err(e) = voice_handler.check_setup().await {
@@ -122,10 +122,10 @@ impl VoiceArgs {
                     });
                 }
 
-                // Choose streaming or batch based on backend and flag
-                let use_streaming = self.streaming || matches!(self.backend, TranscriptionBackendArg::AwsTranscribe);
+                // Choose streaming or batch based on model and flag
+                let use_streaming = self.streaming || matches!(self.model, TranscriptionBackendArg::AwsTranscribe);
                 let transcription_result = if use_streaming && voice_handler.supports_streaming() {
-                    if matches!(self.backend, TranscriptionBackendArg::AwsTranscribe) {
+                    if matches!(self.model, TranscriptionBackendArg::AwsTranscribe) {
                         execute!(
                             session.stderr,
                             style::SetForegroundColor(Color::Cyan),
@@ -147,7 +147,7 @@ impl VoiceArgs {
                         execute!(
                             session.stderr,
                             style::SetForegroundColor(Color::Yellow),
-                            style::Print("⚠️  Streaming not supported by this backend, using batch mode\n"),
+                            style::Print("⚠️  Streaming not supported by this model, using batch mode\n"),
                             style::SetForegroundColor(Color::Reset)
                         )?;
                     }
@@ -180,13 +180,7 @@ impl VoiceArgs {
                         Ok(ChatState::HandleInput { input: voice_input })
                     },
                     Ok(None) => {
-                        execute!(
-                            session.stderr,
-                            style::SetForegroundColor(Color::Yellow),
-                            style::Print("🔇 No voice input detected\n\n"),
-                            style::SetForegroundColor(Color::Reset)
-                        )?;
-
+                        // Silent handling - no message needed like Whisper
                         Ok(ChatState::PromptUser {
                             skip_printing_tools: true,
                         })

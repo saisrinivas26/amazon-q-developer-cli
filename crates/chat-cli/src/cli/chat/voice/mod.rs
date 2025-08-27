@@ -33,10 +33,9 @@ pub fn show_voice_setup_help() {
     println!("• Real-time transcription with streaming providers");
     println!("• Press Enter to stop recording or Ctrl+C to cancel");
     println!();
-    println!("Backend Options:");
-    println!("• AWS Transcribe: /voice --backend aws-transcribe (streaming)");
-    println!("• Local Whisper: /voice --backend local-whisper (batch)");
-    println!("• Local Parakeet: /voice --backend local-parakeet (streaming)");
+    println!("Model Options:");
+    println!("• AWS Transcribe: /voice --model aws-transcribe (streaming)");
+    println!("• Local Whisper: /voice --model local-whisper (batch)");
     println!();
     println!("Features:");
     println!("• 🔄 Real-time streaming transcription");
