@@ -82,9 +82,15 @@ impl VoiceHandler {
             return self.listen_for_speech().await;
         }
 
-        // Initialize enhanced display
-        let mut display = VoiceDisplay::new();
-        display.start_display()?;
+        println!("🔄 AWS Transcribe streaming mode - real-time transcription");
+        println!();
+        println!("🗣️  Speak into your microphone now!");
+        println!("📝 Transcription will appear below:");
+        println!();
+
+        // Simple status line that updates in place (like Whisper)
+        print!("⏱️  0.0s | 🎙️  [░░░░░░░░░░░░░░░░░░░░] | 💬 ");
+        io::stdout().flush().ok();
         
         // Use new streaming transcription infrastructure
         let (audio_tx, audio_rx) = mpsc::channel::<Vec<u8>>(1000);
@@ -231,7 +237,8 @@ impl VoiceHandler {
                 // Regular display updates with real-time voice activity
                 _ = display_timer.tick() => {
                     if last_update.elapsed() >= Duration::from_millis(100) {
-                        display.update_streaming(&current_transcript, None, current_voice_level)?;
+                        let elapsed = recording_start.elapsed().as_secs_f32();
+                        Self::update_single_line(&current_transcript, elapsed, current_voice_level);
                         last_update = Instant::now();
                         voice_activity_counter += 1;
                     }
@@ -265,8 +272,8 @@ impl VoiceHandler {
 
         // No audio forward handle to abort in streaming mode
         
-        // Clean up live HUD display
-        display.cleanup()?;
+        // Move to new line after single-line status updates
+        println!();
 
         if current_transcript.trim().is_empty() {
             return Ok(None);
