@@ -93,12 +93,54 @@ impl VoiceHandler {
         // Convert audio to streaming format
         let (blob_tx, blob_rx) = mpsc::channel(1000);
         
-        // Convert raw audio to AudioBlob format
+        // Convert raw audio to AudioBlob format with voice activity level detection
+        let (vad_tx, mut vad_rx) = mpsc::channel::<u8>(100);
         tokio::spawn(async move {
             let mut audio_rx = audio_rx;
             let mut chunk_count = 0;
+            let mut current_level = 0u8;
+            
             while let Some(audio_chunk) = audio_rx.recv().await {
                 chunk_count += 1;
+                
+                // Voice Activity Level Detection (0-8 scale like Whisper)
+                if audio_chunk.len() >= 2 {
+                    let samples: Vec<i16> = audio_chunk
+                        .chunks_exact(2)
+                        .map(|c| i16::from_le_bytes([c[0], c[1]]))
+                        .collect();
+                    
+                    let rms = if !samples.is_empty() {
+                        (samples.iter()
+                            .map(|&s| (s as f64).powi(2))
+                            .sum::<f64>() / samples.len() as f64)
+                            .sqrt()
+                    } else { 0.0 };
+                    
+                    let norm = rms / 32767.0_f64;
+                    let db = if norm > 0.0 { 20.0 * norm.log10() } else { -100.0 };
+                    
+                    // Convert dB to activity level (0-8 scale like Whisper)
+                    if db > -30.0 {
+                        current_level = 8; // Very loud
+                    } else if db > -40.0 {
+                        current_level = 6; // Loud
+                    } else if db > -48.0 {
+                        current_level = 4; // Normal speech
+                    } else if db > -60.0 {
+                        current_level = 2; // Quiet
+                    } else {
+                        // Gradual decay for silence
+                        current_level = current_level.saturating_sub(1);
+                    }
+                } else {
+                    // No audio data, decay level
+                    current_level = current_level.saturating_sub(1);
+                }
+                
+                // Send voice activity level
+                let _ = vad_tx.send(current_level).await;
+                
                 let audio_blob = super::streaming::AudioBlob {
                     data: audio_chunk,
                 };
@@ -126,65 +168,73 @@ impl VoiceHandler {
         let silence_timeout = Duration::from_secs(5);
         let max_session_time = Duration::from_secs(30);
         
+        // Timer for regular display updates
+        let mut display_timer = tokio::time::interval(Duration::from_millis(100));
+        display_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        
+        // Current voice activity level (0-8 scale)
+        let mut current_voice_level = 0u8;
+        
         loop {
-            match timeout(Duration::from_millis(100), transcript_receiver.recv()).await {
-                Ok(Some(transcript_event)) => {
-                    let transcript_text = &transcript_event.partial_text;
-                    debug!("Received transcription: '{}' (final: {})", transcript_text, transcript_event.is_final);
-                    
-                    // Update activity timers
-                    last_activity_time = Instant::now();
-                    if !transcript_text.trim().is_empty() {
-                        last_speech_time = Instant::now();
-                        
-                        // Use the proven pattern from old working code
-                        if transcript_event.is_final {
-                            // Final result - add to the continuous transcript (like old code)
+            tokio::select! {
+                // Handle transcription events
+                transcript_result = transcript_receiver.recv() => {
+                    match transcript_result {
+                        Some(transcript_event) => {
+                            let transcript_text = &transcript_event.partial_text;
+                            debug!("Received transcription: '{}' (final: {})", transcript_text, transcript_event.is_final);
+                            
+                            // Update activity timers
+                            last_activity_time = Instant::now();
                             if !transcript_text.trim().is_empty() {
-                                if !current_transcript.is_empty() {
-                                    current_transcript.push(' ');
+                                last_speech_time = Instant::now();
+                                
+                                // Use the proven pattern from old working code
+                                if transcript_event.is_final {
+                                    // Final result - add to the continuous transcript (like old code)
+                                    if !transcript_text.trim().is_empty() {
+                                        if !current_transcript.is_empty() {
+                                            current_transcript.push(' ');
+                                        }
+                                        current_transcript.push_str(transcript_text.trim());
+                                        debug!("Final segment added. Complete transcript: '{}'", current_transcript);
+                                    }
+                                } else {
+                                    // Partial result - update display text but don't accumulate yet
+                                    // Display will be updated by the timer tick
                                 }
-                                current_transcript.push_str(transcript_text.trim());
-                                debug!("Final segment added. Complete transcript: '{}'", current_transcript);
                             }
-                            
-                            // Update display with complete accumulated transcript
-                            let voice_active = true;
-                            let confidence = transcript_event.confidence;
-                            
-                            if last_update.elapsed() >= Duration::from_millis(100) {
-                                display.update_streaming(&current_transcript, Some(confidence), voice_active)?;
-                                last_update = Instant::now();
-                                voice_activity_counter += 1;
-                            }
-                        } else {
-                            // Partial result - show for real-time feedback but don't accumulate
-                            let display_text = if current_transcript.is_empty() {
-                                transcript_text.to_string()
-                            } else {
-                                format!("{} {}", current_transcript, transcript_text)
-                            };
-                            
-                            let voice_active = true;
-                            let confidence = transcript_event.confidence;
-                            
-                            if last_update.elapsed() >= Duration::from_millis(100) {
-                                display.update_streaming(&display_text, Some(confidence), voice_active)?;
-                                last_update = Instant::now();
-                                voice_activity_counter += 1;
-                            }
-                            debug!("Partial update shown: '{}'", display_text);
+                        }
+                        None => {
+                            println!("🔚 Transcript receiver channel closed");
+                            break; // Channel closed
                         }
                     }
-                },
-                Ok(None) => {
-                    println!("🔚 Transcript receiver channel closed");
-                    break; // Channel closed
-                },
-                Err(_) => {
-                    // Timeout - update display and check for silence timeout
-                    // Do not mutate confidence/activity on idle ticks
-                    display.update_streaming(&current_transcript, None, /*voice_active=*/false)?;
+                }
+                
+                // Handle voice activity detection updates
+                voice_level = vad_rx.recv() => {
+                    match voice_level {
+                        Some(level) => {
+                            current_voice_level = level;
+                            if level > 0 {
+                                last_activity_time = Instant::now();
+                            }
+                        }
+                        None => {
+                            // VAD channel closed
+                            current_voice_level = 0;
+                        }
+                    }
+                }
+                
+                // Regular display updates with real-time voice activity
+                _ = display_timer.tick() => {
+                    if last_update.elapsed() >= Duration::from_millis(100) {
+                        display.update_streaming(&current_transcript, None, current_voice_level)?;
+                        last_update = Instant::now();
+                        voice_activity_counter += 1;
+                    }
                     
                     // Check silence timeout conditions
                     let speech_silence = last_speech_time.elapsed();
@@ -593,10 +643,10 @@ impl VoiceHandler {
 
         println!();
 
-        // Auto-submit in batch mode - skip menu entirely for immediate response
-        let autosubmit = std::env::var("Q_VOICE_AUTOSUBMIT").as_deref() == Ok("1") || true; // Always auto-submit for batch
+        // Check for auto-submit environment variable
+        let autosubmit = std::env::var("Q_VOICE_AUTOSUBMIT").as_deref() == Ok("1");
         if autosubmit {
-            // Skip menu entirely in batch mode - immediate submission like Whisper
+            // Skip menu if explicitly requested via environment variable
             return Ok(Some(transcript));
         }
 

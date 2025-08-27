@@ -7,7 +7,7 @@ use crossterm::{
 
 pub struct VoiceDisplay {
     start_time: Instant,
-    voice_activity: Vec<bool>,
+    voice_activity: Vec<u8>,
     current_transcript: String,
     is_final: bool,
 }
@@ -36,15 +36,13 @@ impl VoiceDisplay {
         Ok(())
     }
 
-    pub fn update_streaming(&mut self, text: &str, _confidence: Option<f32>, voice_active: bool) -> io::Result<()> {
+    pub fn update_streaming(&mut self, text: &str, _confidence: Option<f32>, voice_activity_level: u8) -> io::Result<()> {
         self.current_transcript = text.to_string();
 
-        // Only append activity when voice is detected (prevents wiping the bar with idle falses)
-        if voice_active {
-            self.voice_activity.push(true);
-        }
+        // Store the activity level directly (0-8 scale) for proportional bars
+        self.voice_activity.push(voice_activity_level);
 
-        // Keep only last 40 activity samples
+        // Keep only last 40 activity samples for sliding window effect
         if self.voice_activity.len() > 40 {
             self.voice_activity.remove(0);
         }
@@ -71,14 +69,20 @@ impl VoiceDisplay {
         let timer_text = format!("⏱️  Recording: {:.1}s | Status: {}", elapsed, status);
         println!("{}", timer_text);
         
-        // Voice activity bar
+        // Voice activity bar with proportional levels (like Whisper)
         let mut activity_display = String::from("🎙️  [");
-        for &active in &self.voice_activity {
-            if active {
-                activity_display.push('█');
-            } else {
-                activity_display.push('░');
-            }
+        for &level in &self.voice_activity {
+            // Convert 0-8 activity level to bar character
+            // 0 = silent, 1-2 = quiet, 3-4 = normal, 5-6 = loud, 7-8 = very loud
+            let bar_char = match level {
+                0 => '░',           // Silent
+                1..=2 => '▒',       // Quiet
+                3..=4 => '▓',       // Normal speech  
+                5..=6 => '█',       // Loud
+                7..=8 => '█',       // Very loud
+                _ => '░',           // Fallback
+            };
+            activity_display.push(bar_char);
         }
         // Fill remaining space to exactly 40 chars
         for _ in self.voice_activity.len()..40 {
